@@ -1,0 +1,601 @@
+---
+title: "FFPE QC"
+author: "D. Ford Hannum"
+date: "2023-05-15"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+---
+
+```{r setup, include=TRUE, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+# knitr::opts_knit$set(root.dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/')
+library(Seurat)
+
+# install.packages('arrow')
+# install.packages('wkb')
+# install.packages('sf')
+
+# library(arrow) # for downloading the parquet file
+# library(wkb) # for transferring coordinates from "binary" 
+# library(sf) # process tools for spatial data
+library(ggplot2)
+library(data.table)
+library(sfarrow)
+library(ggpubr)
+```
+
+# Introduction
+
+# Loading Data
+
+```{r}
+counts <- as.data.frame(fread('../data/vz-ffpe-showcase/HumanBreastCancerPatient1/HumanBreastCancerPatient1_cell_by_gene.csv'))
+
+md <- as.data.frame(fread('../data/vz-ffpe-showcase/HumanBreastCancerPatient1/HumanBreastCancerPatient1_cell_metadata.csv'))
+
+dim(counts)
+
+counts[1:10,1:10]
+
+rownames(counts) <- counts[,1]
+
+counts <- counts[,-1]
+
+counts <- t(counts)
+
+blanks <- counts[grepl('Blank', rownames(counts)),]
+counts <- counts[!grepl('Blank', rownames(counts)),]
+
+colnames(counts) <- 1:dim(counts)[2]
+
+table(rownames(md) == colnames(counts))
+
+```
+
+```{r}
+spat <- CreateSeuratObject(counts = counts,
+                           meta.data = md,
+                           assay = 'Vizgen')
+```
+
+
+```{r}
+# Creating a centroid assay to visualize data in Seurat
+# for most visualizations this is all you would need unless
+# you wanted to interrogate the segmentation further
+
+centroids <- md[,c('center_x','center_y')]
+centroids$cell <- rownames(md)
+colnames(centroids) <- c('x','y','cell')
+
+# Creating the objects compatible with Seurat
+cents <- CreateCentroids(centroids)
+
+# Combining the spatial Seurat objects
+segmentation.data <- list(
+  "centroids" = cents
+)
+
+# Turning the spatial Seurat objects into one "FOV" image
+coords <- CreateFOV(
+  coords = segmentation.data,
+  type = c('centroids'),
+  assay = 'Vizgen'
+)
+
+spat[['centroids']] <- coords
+```
+
+# Cell QC
+
+```{r}
+spat$lib.size <- colSums(spat@assays$Vizgen@counts)
+
+table(spat$lib.size == 0)
+
+ggplot(spat@meta.data, aes(x = lib.size)) + 
+  geom_histogram() +
+  theme_bw() +
+  scale_x_log10()
+
+spat$lib.size_cat <- ifelse(spat$lib.size == 0,'empty',
+                            ifelse(spat$lib.size < 100, 'low','pass'))
+
+table(spat$lib.size_cat,exclude = F)
+
+?ImageDimPlot
+
+ImageDimPlot(spat, fov = 'centroids', split.by = 'lib.size_cat')
+
+plot_list <- list()
+for (i in unique(spat$lib.size_cat)){
+  temp <- spat@meta.data[spat$lib.size_cat == i,]
+  plot_list[[i]] <- ggplot(temp, aes(x = center_x, y = center_y)) + 
+    geom_point(size = 1, alpha = .5) +
+    theme_bw()
+}
+
+ggarrange(plotlist = plot_list, ncol = 3)
+
+plot_list <- list()
+plot_list[['all']] <- ggplot(spat@meta.data, aes(x = center_x, y = center_y)) +
+  stat_density_2d() +
+  ggtitle('all') +
+  coord_fixed() +
+  theme_bw()
+for (i in unique(spat$lib.size_cat)){
+  temp <- spat@meta.data[spat$lib.size_cat == i,]
+  plot_list[[i]] <- ggplot(temp, aes(x = center_x, y = center_y)) + 
+    stat_density_2d() +
+    ggtitle(i) +
+    theme_bw() + coord_fixed()
+}
+
+ggarrange(plotlist = plot_list, ncol = 2, nrow = 2)
+
+```
+
+The distribution of cells that would pass a nCount_RNA > 100 looks very similar to the distribution of all cells. The distribution of empty cells shows a distinct pattern, as well as low cells.
+
+```{r}
+ImageFeaturePlot(spat, fov = 'centroids',features = 'lib.size')
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y, color = lib.size)) +
+  geom_point(size = .1) 
+
+spat$lib.size_log10 <- log10(spat$lib.size)
+table(spat$lib.size == 0)
+# spat@meta.data[spat$lib.size == 0,]
+table(is.na(spat$lib.size_log10))
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y ,color = lib.size_log10)) +
+  geom_point(size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$lib.size_log10))
+
+spat$lib.size_log10_flr1 <- log10(spat$lib.size + 1)
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y ,color = lib.size_log10_flr1)) +
+  geom_point(size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$lib.size_log10_flr1))
+```
+
+We see a similar trend where certain areas of the tissue have lower library size than others, but no specific pockets where we see drastically larger library size.
+
+```{r}
+ggplot(spat@meta.data, aes(x = volume)) + geom_histogram()
+
+summary(spat$volume)
+
+spat$volume_log10 <- log10(spat$volume)
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y ,color = volume_log10)) +
+  geom_point(size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$volume_log10))
+```
+
+We see different trends with volume. Instead of by rows/blocks, they see to follow more biologically shapes/lines.
+
+```{r}
+spat$density <- spat$lib.size / spat$volume
+
+ggplot(spat@meta.data, aes(x = density)) + geom_histogram()
+
+summary(spat$density)
+
+min_ <- min(spat$density[spat$density != 0])
+min_ 
+spat$density_log2 <- log2(spat$density + .0001)
+
+ggplot(spat@meta.data, aes(x = density_log2)) + geom_histogram()
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y ,color = density_log2)) +
+  geom_point(size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$density_log2))
+```
+
+When we look at the density (lib.size / volume) we see the stripping "artifact show back up.
+
+Perhaps this is to do with specific FOVs.
+
+```{r}
+library(dplyr)
+# spat@meta.data
+fovs <- spat@meta.data %>%
+  group_by(fov) %>%
+  summarise(min_x = min(min_x), max_x = max(max_x),
+            min_y = min(min_y), max_y = max(max_y),
+            center_x = mean(center_x), center_y = mean(center_y),
+            lib.size_log10_flr1 = mean(lib.size_log10_flr1),
+            volume_log10 = mean(volume_log10),
+            density_log2 = mean(density_log2))
+
+head(fovs)
+
+ggplot() +
+  geom_rect(data = fovs, 
+            aes(xmin = min_x, xmax = max_x, ymin = min_y, ymax = max_y),
+            colour = 'black', fill = NA)
+```
+
+```{r}
+ggplot() +
+  geom_point(data = spat@meta.data,
+             aes(x = center_x, y = center_y ,color = lib.size_log10_flr1),
+             size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$lib.size_log10_flr1)) + 
+  geom_rect(data = fovs, 
+            aes(xmin = min_x, xmax = max_x, ymin = min_y, ymax = max_y),
+            colour = 'black', fill = NA)
+
+ggplot() +
+  geom_point(data = spat@meta.data,
+             aes(x = center_x, y = center_y ,color = density_log2),
+             size = .1, alpha = .5) +
+  scale_color_gradient2(low = 'blue', high = 'red', mid = 'lightgrey',
+                        midpoint = median(spat$density_log2)) + 
+  geom_rect(data = fovs, 
+            aes(xmin = min_x, xmax = max_x, ymin = min_y, ymax = max_y),
+            colour = 'black', fill = NA)
+```
+
+
+```{r}
+
+ggplot(fovs, aes(x = center_x, y = center_y, color = lib.size_log10_flr1)) +
+  geom_point() +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey', high = 'red',
+                        midpoint = median(fovs$lib.size_log10_flr1))
+
+ggplot(fovs, aes(x = center_x, y = center_y, color = volume_log10)) +
+  geom_point() +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey', high = 'red',
+                        midpoint = median(fovs$volume_log10))
+
+ggplot(fovs, aes(x = center_x, y = center_y, color = density_log2)) +
+  geom_point() +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey', high = 'red',
+                        midpoint = median(fovs$density_log2))
+
+```
+
+# Gene QC
+
+## By Cell
+
+```{r}
+gene.md <- data.frame(counts = rowSums(counts),
+                      mean = rowMeans(counts),
+                      sd = apply(counts, 1,sd),
+                      zeros = apply(counts,1, function(x){sum(x == 0)}))
+```
+
+```{r}
+ggplot(gene.md, aes( x= counts)) +
+  geom_histogram()
+
+gene.md$counts_log10 <- log10(gene.md$counts)
+
+ggplot(gene.md, aes(x = counts_log10)) +
+  geom_histogram() +
+  theme_bw()
+```
+
+```{r}
+ggplot(gene.md, aes( x= mean)) +
+  geom_histogram()
+
+gene.md$mean_log2 <- log2(gene.md$mean)
+
+ggplot(gene.md, aes(x = mean_log2)) +
+  geom_histogram() +
+  theme_bw()
+```
+
+```{r}
+ggplot(gene.md, aes( x= sd)) +
+  geom_histogram()
+
+gene.md$sd_log2 <- log2(gene.md$sd)
+
+ggplot(gene.md, aes(x = sd_log2)) +
+  geom_histogram() +
+  theme_bw()
+
+```
+
+```{r}
+ggplot(gene.md, aes( x= zeros)) +
+  geom_histogram()
+
+ggplot(gene.md, aes( x= zeros)) +
+  geom_boxplot()
+
+gene.md$zeros_log10 <- log10(gene.md$zeros)
+
+gene.md$pct.zeros <- gene.md$zeros / dim(counts)[2]
+
+ggplot(gene.md, aes(x = zeros_log10)) +
+  geom_histogram() +
+  theme_bw()
+
+ggplot(gene.md, aes(x = pct.zeros)) +
+  geom_histogram()
+
+
+ggplot(gene.md, aes( x= pct.zeros)) +
+  geom_boxplot()
+
+summary(gene.md$pct.zeros)
+```
+
+```{r}
+ggplot(gene.md, aes(x = mean_log2, y = sd_log2)) +
+  geom_point(alpha = .5) +
+  theme_bw() +
+  stat_cor()
+```
+
+## By FOV
+
+I'm not going back to the detected_transcripts.csv (~36 GB!?!), but instead just going to aggregate the transcripts by cells in each FOV. One caveat is we are only looking at transcripts captured in cells rather than all transcripts. 
+
+```{r}
+c_ <- t(counts)
+
+c_[1:10,1:10]
+
+zeros <- function(x){sum(x == 0)}
+gene_fovs <- as.data.frame(c_) %>%
+  group_by(spat$fov) %>%
+  summarise_all(list(counts = sum,
+                     zeros = zeros,
+                     sd = sd))
+
+gene_fov_counts <- data.frame(row.names = tstrsplit(colnames(gene_fovs[,grepl('counts',
+                                                                    colnames(gene_fovs))]),
+                                                    '_', keep = 1)[[1]],
+                              mean = colMeans(gene_fovs[,grepl('counts',
+                                                                    colnames(gene_fovs))]),
+                              sd = apply(gene_fovs[,grepl('counts', colnames(gene_fovs))],
+                                         2, sd))
+
+ggplot(gene_fov_counts, aes(x = mean, y = sd)) + 
+  geom_point(alpha = .5) +
+  scale_x_log10() + scale_y_log10() +
+  theme_bw() +
+  stat_cor()
+
+fovs <- spat@meta.data %>%
+  group_by(fov) %>%
+  summarise(min_x = min(center_x), max_x = max(center_x),
+            min_y = min(center_y), max_y = max(center_y),
+            center_x = mean(center_x), center_y = mean(center_y),
+            lib.size_log10_flr1 = mean(lib.size_log10_flr1),
+            volume_log10 = mean(volume_log10),
+            density_log2 = mean(density_log2))
+```
+
+# Filtering Seurat Object
+
+
+```{r}
+spat@meta.data
+ggplot(spat@meta.data, aes(x = lib.size_log10_flr1)) + geom_histogram() +
+  theme_bw() +
+  geom_vline(xintercept =  log10(c(50,100,200)), colour = 'red',linetype = 2)
+```
+
+For now I want to keep as much data as possible.
+
+```{r}
+spat$lib.size_cat2 <- ifelse(spat$lib.size < 50,'<50',
+                             ifelse(spat$lib.size < 100,'50-100',
+                                    ifelse(spat$lib.size < 200,'100-200','>200')))
+
+ggplot(spat@meta.data, aes(x = center_x, y = center_y, colour = lib.size_cat2)) +
+  geom_point(size = .1) +
+  scale_color_manual(values = c('lightgrey','red','blue','purple'))
+
+table(spat$lib.size_cat2)
+```
+
+```{r}
+spat <- subset(spat, nCount_Vizgen >= 50)
+```
+
+```{r}
+spat
+```
+
+```{r}
+ggplot(spat@meta.data, aes(x = center_x, y = center_y)) + geom_point(size = .1) +
+  coord_fixed()
+```
+
+We do see a few of those strips with low library size being filtered out here. That's fine since we think they're a technical artifact rather than a biologic one.
+
+```{r}
+spat_og <- spat
+```
+
+# Analysis with SCTransform
+
+```{r}
+options(future.globals.maxSize = 8000*1024^2)
+spat <- SCTransform(spat, assay = 'Vizgen',clip.range = c(-10,10))
+```
+
+```{r}
+spat
+```
+
+
+```{r}
+spat <- RunPCA(spat, npcs = 30, features = rownames(spat))
+spat <- RunUMAP(spat, dims = 1:30)
+spat <- FindNeighbors(spat, reduction = 'pca', dims = 1:30)
+spat <- FindClusters(spat, resolution = 0.3)
+spat <- FindClusters(spat, resolution = 1.5)
+```
+
+```{r}
+spat
+```
+
+
+```{r}
+saveRDS(spat, '../data/vz-ffpe-showcase/HumanBreastCancerPatient1/seurat_object.Rds')
+```
+
+```{r}
+saveRDS(gene.md, '../data/vz-ffpe-showcase/HumanBreastCancerPatient1/gene_md.Rds')
+```
+
+# Reloading Object
+
+```{r}
+spat <- readRDS('../data/vz-ffpe-showcase/HumanBreastCancerPatient1/seurat_object.Rds')
+
+```
+
+# Clusterings
+
+```{r}
+spat
+tail(spat@reductions$umap@cell.embeddings)
+DimPlot(spat, reduction = 'umap', dims = 1:2)
+
+spat$umap1 <- spat@reductions$umap@cell.embeddings[,1]
+spat$umap2 <- spat@reductions$umap@cell.embeddings[,2]
+
+ggplot(spat@meta.data, aes(x = umap1, y = umap2, colour = SCT_snn_res.0.3)) +
+  geom_point(size = .1) + theme_bw()
+
+ggplot(spat@meta.data, aes(x = umap1, y = umap2, colour = seurat_clusters)) +
+  geom_point(size = .1) + theme_bw()
+
+```
+
+Comparing the clustering results
+
+```{r}
+tmp <- as.data.frame(table(spat$SCT_snn_res.0.3, spat$SCT_snn_res.1.5))
+
+tmp$Var1.sum <- NA
+for (i in unique(tmp$Var1)){
+  tmp[tmp$Var1 == i,]$Var1.sum <- sum(tmp[tmp$Var1 == i,]$Freq)
+}
+
+tmp$Var2.sum <- NA
+for (i in unique(tmp$Var2)){
+  tmp[tmp$Var2 == i,]$Var2.sum <- sum(tmp[tmp$Var2 == i,]$Freq)
+}
+
+tmp$Var1.perc <- tmp$Freq / tmp$Var1.sum
+tmp$Var2.perc <- tmp$Freq / tmp$Var2.sum
+
+tmp$jaccard <- tmp$Freq / (tmp$Var1.sum + tmp$Var2.sum - tmp$Freq)
+# 
+# ggplot(tmp, aes(x = Var2, y = Var1, fill = jaccard, label = Freq)) +
+#   geom_tile() +
+#   geom_text() +
+#   scale_fill_gradient(low = 'white',high = 'red')
+
+max_list <- c()
+for (i in unique(tmp$Var2)){
+  print(i)
+  
+  max_list <- c(max_list,which.max(tmp[tmp$Var2 ==i,]$Freq) - 1)
+}
+
+names(max_list) <- unique(tmp$Var2)
+max_list
+order_list <- c()
+for (i in levels(tmp$Var1)){
+  temp <- names(max_list)[max_list == i]
+  
+  temp <- tmp[tmp$Var1 == i & tmp$Var2 %in% temp,]
+  
+  order_list <- c(order_list,temp[order(temp$Freq, decreasing = T),]$Var2)
+}
+
+order_list <- order_list - 1
+
+tmp$Var2.ordered <- factor(tmp$Var2, levels = order_list)
+
+tmp$label <- ifelse(tmp$Freq != 0, tmp$Freq, '')
+
+tmp$jaccard2 <- ifelse(tmp$jaccard == 0, NA, tmp$jaccard)
+
+ggplot(tmp, 
+       aes(x = Var2.ordered, y = Var1, fill = jaccard, label = label)) +
+  geom_tile() +
+  theme_bw() +
+  coord_flip() +
+  geom_text() +
+  ylab('General Clusters (res = 0.3)') +
+  xlab('Finer Clusters (res = 1.5)') +
+  scale_fill_gradient(low = 'white',high = 'red')
+
+tmp$`Finer Cluster\nPercentage` <- tmp$Var2.perc
+ggplot(tmp, 
+       aes(x = Var2.ordered, y = Var1,
+           fill = `Finer Cluster\nPercentage`, label = label)) +
+  geom_tile() +
+  theme_bw() +
+  coord_flip() +
+  geom_text() +
+  ylab('General Clusters (res = 0.3)') +
+  xlab('Finer Clusters (res = 1.5)') +
+  scale_fill_gradient(low = 'white',high = 'red')
+```
+
+We see that for the most part that we have a one-to-one direction between clusters, but we also see some finer clusters (res = 1.5), that span multiple general clusters (res = 0.3)
+
+# Clusters Spatially
+
+```{r}
+# spat
+ImageDimPlot(spat, fov = 'centroids', cols = 'polychrome', axes = TRUE)
+```
+
+```{r}
+ggplot(spat@meta.data, aes(x = center_x, y = center_y, colour = SCT_snn_res.0.3)) +
+  geom_point(size = .1) +
+  theme_bw() 
+ggplot(spat@meta.data, aes(x = center_x, y = center_y, colour = seurat_clusters)) +
+  geom_point(size = .1) +
+  theme_bw() 
+```
+
+```{r}
+colors <- scales::hue_pal()(10)
+
+for (i in 0:9){
+  colors_ <- colors[i+1]
+  temp <- spat@meta.data[spat$SCT_snn_res.0.3 == i,]
+  print(ggplot(temp, aes(x = center_x, y = center_y,
+                         color = SCT_snn_res.0.3)) +
+          theme_bw() +
+          scale_color_manual(values = colors_) +
+          geom_point(size = .2))
+}
+```
+
+```{r}
+ggplot(spat@meta.data, aes(x = center_x, y = center_y, color = volume_log10)) +
+  geom_point(size = .1) +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey', high = 'red', 
+                        midpoint = median(spat$volume_log10)) 
+```
+

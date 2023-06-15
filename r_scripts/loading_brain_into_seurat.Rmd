@@ -1,0 +1,490 @@
+---
+title: "Loading into Seurat"
+author: "D. Ford Hannum"
+date: "2023-05-05"
+output: html_document
+  toc: yes
+  toc_depth: 3
+  highlight: tango
+  number_sections: true
+  toc_float: yes
+---
+
+```{r setup, include=TRUE, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+knitr::opts_knit$set(root.dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/')
+# library(Seurat)
+
+# install.packages('arrow')
+# install.packages('wkb')
+# install.packages('sf')
+
+library(arrow)
+library(wkb)
+library(sf)
+library(ggplot2)
+
+
+```
+
+
+```{r}
+root_dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/'
+list.files(root_dir)
+```
+
+# Loading Data
+
+Shared by Nicolas Fernandez how also provided code for loading the file
+
+## Parquet file
+
+Parquet file stores the cell boundary information
+
+The arrow package has a read_parquet function that lets us read in the file
+
+```{r}
+# Nick's code
+start_time <- Sys.time()
+ini_parquet_data <- arrow::read_parquet(paste0(root_dir,'cell_boundaries.parquet'))
+end_time <- Sys.time()
+
+end_time - start_time
+```
+
+Only took ~30s to read in the file
+
+```{r}
+head(ini_parquet_data)
+```
+
+Going to test on just the first 50 shapes
+
+```{r}
+# Nick's code
+
+#making smaller DataFrame
+parquet_data <- ini_parquet_data[1:50,]
+
+# Convert the WKB geometry column to WKT using lapply
+parquet_data$geometry <- lapply(parquet_data$Geometry, wkb::readWKB)
+
+parquet_data[1,c('Geometry','geometry')]
+# Convert the 'SpatialPolygons' column to 'sf' objects using lapply
+parquet_data$geometry2 <- lapply(parquet_data$geometry, function(sp_geom) {
+  st_as_sf(sp_geom)
+})
+
+parquet_data[1,c('geometry','geometry2')]
+
+# Combine the 'sf' objects into a single 'sfc' object
+parquet_data$geometry3 <- do.call(c, parquet_data$geometry)
+
+parquet_data[1,c('geometry','geometry2','geometry3')]
+
+# parquet_data$geometry[1]
+
+# Convert the data to a simple features object
+sf_data <- st_as_sf(parquet_data)
+sf_data
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = sf_data, fill = NA, colour = 'black') +
+  theme_minimal()
+```
+
+```{r}
+sf_data$geometry_og <- sf_data$geometry
+sf_data$geometry <- sf_data$geometry3
+
+ggplot() +
+  geom_sf(data = sf_data, fill = NA, colour = 'black') +
+  theme_minimal()
+```
+
+## Turning spatial polygon into long format data frame
+
+```{r}
+sf_data
+sf_data$geometry_og[1]
+
+temp <- lapply(sf_data$geometry_og, sp::coordinates)
+
+length(temp)
+
+class(temp)
+
+length(temp[[1]])
+
+class(temp[[1]])
+
+temp[1]
+```
+
+```{r}
+# sf_data$geometry_og[1]
+```
+
+```{r}
+temp <- sapply(sf_data$geometry_og, sp::coordinates)
+
+length(temp)
+
+dim(sf_data)
+
+length(temp)
+
+class(temp)
+```
+
+```{r}
+# sp::coordinates(sf_data$geometry_og[1])
+# 
+# sf_data$geometry_og[[1]]@polygons[[1]]@Polygons[[1]]@coords
+```
+
+# Pulling out coordinates from the sf_MULTIPOLYGON
+
+```{r}
+root_dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/'
+ini_parquet_data <- arrow::read_parquet(paste0(root_dir,'cell_boundaries.parquet'))
+```
+
+```{r}
+# Only interested in z = 3 (the middle layer)?
+table(ini_parquet_data$ZIndex == 3)
+
+table(ini_parquet_data$ZIndex)
+
+cell_ids <- unique(ini_parquet_data$EntityID)
+
+length(cell_ids)
+
+cell_ids_z3 <- unique(ini_parquet_data[ini_parquet_data$ZIndex == 3,]$EntityID)
+
+length(cell_ids_z3)
+
+length(cell_ids[!(cell_ids %in% cell_ids_z3)])
+
+cell_ids_otherZ <- cell_ids[!(cell_ids %in% cell_ids_z3)]
+
+table(ini_parquet_data[ini_parquet_data$EntityID %in% cell_ids_otherZ,]$ZIndex)
+
+other_parquet <- ini_parquet_data[ini_parquet_data$EntityID %in% cell_ids_otherZ &
+                                    ini_parquet_data$ZIndex %in% c(0,6),]
+
+sum(duplicated(other_parquet$EntityID))
+
+z3_parquet <- ini_parquet_data[ini_parquet_data$ZIndex == 3,]
+
+sub_parquet <- rbind(z3_parquet, other_parquet)
+
+dim(sub_parquet)
+
+length(cell_ids)
+
+sum(duplicated(sub_parquet$EntityID))
+
+sub_parquet <- as.data.frame(sub_parquet)
+rownames(sub_parquet) <- sub_parquet$EntityID
+
+table(rownames(sub_parquet) %in% cell_ids)
+
+table(cell_ids %in% rownames(sub_parquet))
+
+table(rownames(sub_parquet) == cell_ids)
+class(sub_parquet)
+sub_parquet[as.character(cell_ids),]
+sub_parquet <- sub_parquet[as.character(cell_ids),]
+
+# table(rownames(sub_parquet) == cell_ids)
+```
+
+```{r}
+sf_data_full <- st_as_sf(sub_parquet)
+sf_data <- sf_data_full
+
+# Pulling out a coordinate matrix for each segmentaiton
+coordinates <- lapply(sf_data$Geometry, FUN = sf::st_coordinates)
+# head(coordinates[[1]])
+
+
+# Getting a count of vertices for each segmentation
+coordinates_labels <- lapply(sf_data$Geometry,
+                             function(x){nrow(sf::st_coordinates(x))})
+
+# Combining all the matrices
+coordinates <- do.call(rbind, coordinates)
+
+dim(coordinates)
+# Adding the number of vertices for each polygon
+sf_data$rep <- do.call(c,coordinates_labels)
+
+# Creating a unique index variable with relevant metadata
+sf_data$combined <- paste0(sf_data$ID,'_',sf_data$EntityID,'_',sf_data$ZIndex)
+
+# table(rep(sf_data$combined, sf_data$rep))
+
+coordinates <- as.data.frame(coordinates)
+
+# Adding the metadata to the coordinate dataframe
+coordinates$index <- rep(sf_data$combined, sf_data$rep)
+```
+
+
+```{r}
+ggplot(coordinates[coordinates$X < 2500,])+ 
+  geom_polygon(aes(x = X, y = Y, group = index), fill = NA, colour = 'black') +
+  coord_fixed()
+  
+
+ggplot(coordinates[coordinates$X > 2500,])+ 
+  geom_polygon(aes(x = X, y = Y, group = index), fill = NA, colour = 'black') +
+  coord_fixed()
+```
+
+# Reading into Seurat
+
+```{r}
+list.files(root_dir)
+
+# spat <- LoadVizgen(data.dir = root_dir,fov = 's1_r1',z = 3,)
+counts <- data.table::fread(paste0(root_dir,'./cell_by_gene.csv'))
+# table(duplicated(counts$cell))
+counts <- as.data.frame(counts)
+rownames(counts) <- as.character(counts$cell)
+
+counts <- counts[,-1]
+dim(counts)
+
+blanks <- counts[,grepl('Blank', colnames(counts), ignore.case = T)]
+dim(blanks)
+counts <- counts[,!grepl('Blank', colnames(counts), ignore.case = T)]
+
+md <- as.data.frame(data.table::fread(paste0(root_dir,'./cell_metadata.csv')))
+# dim(md) == dim(counts)
+rownames(md) <- md$EntityID
+# table(rownames(md) == rownames(counts))
+
+counts <- t(counts)
+# list.files(root_dir)
+transcripts = as.data.frame(data.table::fread(paste0(root_dir,"partitioned_transcripts.csv")))
+
+spat <- CreateSeuratObject(counts =  counts,
+                           meta.data = md, 
+                           assay = 'Vizgen')
+
+centroids <- md[,c('center_x','center_y','EntityID')]
+colnames(centroids) <- c('x','y','cell')
+```
+
+
+```{r}
+# x <- ReadVizgen(data.dir = root_dir)
+# list.files(root_dir)
+# ?ReadVizgen
+# 
+# ?CreateFOV
+```
+
+```{r}
+
+# from
+# https://divingintogeneticsandgenomics.rbind.io/post/how-to-construct-a-spatial-object-in-seurat/
+
+coordinates$cell <- data.table::tstrsplit(coordinates$index,'_',keep = 2)[[1]]
+
+# table(coordinates$cell %in% centroids$cell)
+# coordinates$x <- coordinates$X
+# coordinates$y <- coordinates$Y
+
+coordinates_ <- coordinates[,c('X','Y','cell')]
+colnames(coordinates_) <- c('x','y','cell')
+
+coords <- CreateSegmentation(coordinates_)
+cents <- CreateCentroids(centroids)
+segmentations.data <- list(
+  "centroids" = cents,
+  "segmentation" = coords
+)
+
+coords <- CreateFOV(
+  coords = segmentations.data,
+  type = c("segmentation", "centroids"),
+  molecules = transcripts,
+  assay = 'Vizgen'
+)
+
+spat[['image']] <- coords
+
+getwd()
+saveRDS(spat, '../data/mouse_brain_showcase/Slice-1_Replicate-1/seurat_object2.Rds')
+
+# GetTissueCoordinates(spat[['image']][['segmentation']])
+```
+
+# Reloading the data
+
+```{r}
+spat <- readRDS('../data/mouse_brain_showcase/Slice-1_Replicate-1/seurat_object.Rds')
+
+# spat[['image']] <- NULL
+```
+
+
+# Processing w/ Seurat
+
+```{r}
+start.time <- Sys.time()
+spat <- SCTransform(spat, assay = 'Vizgen', 
+                    clip.range = c(-10,10))
+
+spat <- RunPCA(spat, npcs = 30, features = rownames(spat))
+
+spat <- RunUMAP(spat, dims = 1:30)
+
+spat <- FindNeighbors(spat, reduction = 'pca', dims = 1:30)
+spat <- FindClusters(spat, resolution = 0.3)
+end.time <- Sys.time()
+
+start.time - end.time
+```
+
+```{r}
+DimPlot(spat, reduction = 'umap')
+```
+
+
+```{r}
+ImageDimPlot(spat, fov = 'image', cols = 'polychrome', axes = TRUE)
+```
+
+```{r}
+p1 <- ImageDimPlot(spat, fov = "image", cols = "red", cells = WhichCells(spat, idents = 14))
+p2 <- ImageDimPlot(spat, fov = "image", cols = "red", cells = WhichCells(spat, idents = 15))
+p1 + p2
+```
+
+```{r}
+# vizgen.obj <- spat
+# 
+# install.packages('rgeos')
+library(rgeos)
+library(future)
+
+# plan('multisession', workers = 4)
+# https://github.com/satijalab/seurat/issues/1845
+options(future.globals.maxSize = 8000*1024^2)
+vizgen.obj <- spat 
+cropped.coords <- Crop(vizgen.obj[["image"]], x = c(2500, 3000), y = c(3750, 4250), coords = "plot")
+# # set a new field of view (fov)
+vizgen.obj[["hippo"]] <- cropped.coords
+
+vizgen.obj[['hippo2']] <- cropped.coords
+```
+
+```{r}
+ImageDimPlot(vizgen.obj, fov = 'hippo2', axes = TRUE, size = 0.7, border.color = 'white',
+             cols = 'polychrome', coord.fixed = T)
+```
+
+
+```{r}
+DefaultBoundary(vizgen.obj[['hippo']])
+ImageDimPlot(vizgen.obj, fov = 'hippo2', axes = TRUE, size = 0.7, border.color = 'white',
+             cols = 'polychrome', coord.fixed = T,boundaries = 'segmentation')
+```
+
+
+```{r}
+# sub <- subset(spat, center_x > 1750 & center_x < 3000 & center_y > 3750 & center_y < 5250)
+# 
+# spat$keep <- spat$center_x > 1750 & spat$center_x < 3000 & spat$center_y < 5250 & spat$center_y > 3750
+# 
+# table(spat$keep)
+# 
+# subset_ <- subset(x = spat, subset = keep == TRUE)
+
+```
+
+
+```{r}
+ImageDimPlot(subset_, axes = TRUE, size = 0.7, border.color = 'white', cols ='polychrome',
+             coord.fixed = TRUE)
+
+DefaultBoundary(subset_)
+```
+
+
+# Working code/notes
+
+```{r}
+sf_data$Geometry[1]
+
+sf::st_coordinates(sf_data$Geometry[1])
+
+x <- lapply(sf_data$Geometry, FUN = sf::st_coordinates)
+x_rep <- lapply(sf_data$Geometry, function(x){nrow(sf::st_coordinates(x))})
+
+length(x)
+class(x)
+length(x[[1]])
+
+dim(x[[1]])
+
+head(x[[1]])
+```
+
+```{r}
+head(x[[2]])
+```
+
+```{r}
+# for (i in length(x)){
+#   break
+#   x[[i]][,'id'] = sf_data[i,]$id
+#   x[[i]][,'EntityID'] <- sf_data[i,]$EntityID
+#   x[[i]][,'Zindex'] <- sf_data[i,]$ZIndex
+# }
+# x[[i]][,7] <- 1
+
+x_combined <- do.call(rbind, x)
+```
+
+```{r}
+sf_data$rep <- do.call(c,x_rep)
+
+t <- sf_data[,]
+
+t2 <- t[rep(seq_len(nrow(t)), each = sf_data$rep),]
+
+sf_data$combined <- paste0(sf_data$ID,'_',sf_data$EntityID,'_',sf_data$ZIndex)
+
+table(rep(sf_data$combined, each = sf_data$rep))
+
+sf_data$combined
+sf_data$rep
+
+table(rep(sf_data$combined, sf_data$rep))
+
+x_combined <- as.data.frame(x_combined)
+x_combined$index <- rep(sf_data$combined, sf_data$rep)
+```
+
+
+```{r}
+sf_data
+x_combined[c('ID','EntityID','ZIndex')] <- data.table::tstrsplit(x_combined$index,'_')
+
+head(x_combined)
+
+?geom_polygon
+ggplot(x_combined)+ 
+  geom_polygon(aes(x = X, y = Y, group = index), fill = NA, colour = 'black')
+  
+```
+
+
+
