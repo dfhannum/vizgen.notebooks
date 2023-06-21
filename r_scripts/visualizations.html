@@ -357,11 +357,16 @@ display: none;
 </div>
 
 
+<div id="introduction" class="section level1">
+<h1>Introduction</h1>
+<p>The eventual goal would be to get this notebook functional on google
+colab accessing data from AWS s3 buckets.</p>
+<p>Here we will show how to load images (DAPI), segmentation (parquet),
+and transcripts into one image.</p>
 <pre class="r"><code>knitr::opts_chunk$set(echo = TRUE)
 library(sfarrow)
-library(sf)</code></pre>
-<pre><code>## Linking to GEOS 3.11.1, GDAL 3.6.2, PROJ 9.1.1; sf_use_s2() is TRUE</code></pre>
-<pre class="r"><code>library(data.table)
+library(sf)
+library(data.table)
 library(ggplot2)
 
 base_path &lt;- &#39;/Users/DouglasHannumJr/Desktop/mouse_brain_showcase_s1r1/&#39;
@@ -375,12 +380,6 @@ print(list.files(base_path))</code></pre>
 <pre><code>## [1] &quot;micron_to_mosaic_pixel_transform.csv&quot;
 ## [2] &quot;mosaic_DAPI_z1.tif&quot;                  
 ## [3] &quot;mosaic_DAPI_z3.tif&quot;</code></pre>
-<div id="introduction" class="section level1">
-<h1>Introduction</h1>
-<p>The eventual goal would be to get this notebook functional on google
-colab accessing data from AWS s3 buckets.</p>
-<p>Here we will show how to load images (DAPI), segmentation (parquet),
-and transcripts into one image.</p>
 </div>
 <div id="transformation-matrix" class="section level1">
 <h1>Transformation Matrix</h1>
