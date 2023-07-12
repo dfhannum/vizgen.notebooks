@@ -1,0 +1,269 @@
+---
+title: "SingleR Implementation for Cell Type Annotation"
+author: "D. Ford Hannum"
+date: "2023-07-12"
+output: 
+  html_document:
+    toc: true
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+    code_folding: hide
+---
+# Introduction
+
+This file accompanies the Vizgen Analysis Guides: Cell Type Annotation.
+
+Here we will look at the implementation of an open source package [SingleR](https://bioconductor.org/packages/release/bioc/html/SingleR.html) to assist in cell type annotation.
+
+# Loading packages
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat) # to run normalizaiton methods
+# BiocManager::install('SingleR')
+# install.packages('matrixStats')
+# BiocManager::install('scran')
+library(scran)
+library(SingleR)
+library(data.table) # data processing library
+library(ggplot2) # package to make visualizaitons
+# BiocManager::install('scRNAseq')
+library(scRNAseq) # package to access reference scRNA data
+```
+
+
+# Loading Data
+
+Here we are going to use publicaly available data from a MERSCOPE mouse brain sample.
+
+For our purposes we only need cell_by_gene.csv and cell_metadata.csv files.
+
+```{r}
+md <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_metadata.csv',
+               header = T, data.table = FALSE)
+
+counts <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_by_gene.csv',
+               header = T, data.table = FALSE)
+
+rownames(md) <- md$EntityID 
+rownames(counts) <- counts$cell
+counts <- counts[,-1] # removing cells as a column so we have a data frame of only counts
+blanks <- counts[,grepl('Blank', colnames(counts))]
+counts <- counts[,!grepl('Blank', colnames(counts))] # removing blanks
+
+counts <- t(counts)
+
+# counts[1:5,1:5]
+# table(rownames(md) == colnames(counts)) # making sure the data frames align
+```
+
+```{r}
+ggplot(md, aes(x = center_x, y = -center_y)) + 
+  geom_point(size = .1) + theme_bw()
+```
+
+## Reference
+
+Here we are going to use the [Chen et al. 2017](https://pubmed.ncbi.nlm.nih.gov/28355573/) mouse brain.
+
+Below is a table of the cell type labels present in the data and the number of cells they have for each type.
+
+```{r}
+ref <- ChenBrainData()
+
+table(ref$SVM_clusterID, exclude = F)
+```
+
+```{r}
+# remotes::install_github("LTLA/scuttle")
+library(scuttle)
+
+ref <- logNormCounts(ref)
+```
+
+
+# Creating Seurat Object
+
+We are going to create a Seurat object out of our data.
+
+```{r, message = FALSE,}
+spat <- CreateSeuratObject(counts = counts,
+                           assay = 'RNA',
+                           meta.data = md)
+spat <- subset(spat, nCount_RNA >= 100)
+
+spat <- NormalizeData(spat, normalization.method = 'LogNormalize',
+                      scale.factor =  1e4)
+spat <- ScaleData(spat, features = rownames(spat))
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10)
+
+spat <- FindClusters(spat, resolution = .5)
+
+spat <- RunUMAP(spat, dims = 1:10)
+
+```
+
+# Running SingleR
+
+```{r}
+# We need the Seurat object as a single cell expeirment for SingleR
+test <- as.SingleCellExperiment(spat)
+
+# Running SingleR
+pred <- SingleR(test = test, ref = ref, labels = ref$SVM_clusterID,
+                de.method = 'wilcox')
+
+spat$labels_fine <- pred$labels
+spat$delta <- pred$delta.next
+spat$labels_prune <- pred$pruned.labels
+```
+
+Below is a table of the predicted labels.
+
+```{r}
+table(pred$labels)
+```
+
+## General Groups
+
+Here I'm going to combine some of the groups into larger groups for easy of analysis.
+
+The larger groups I'm going to create are GABA, Glu, and Epith; which combine the many GABA+, Glu+, and Epith labels.
+
+```{r}
+spat$labels_general <- ifelse(grepl('GABA', spat$labels_fine),'GABA',
+                              ifelse(grepl('Glu', spat$labels_fine),'Glu',
+                                     ifelse(grepl('Epith', spat$labels_fine), 'Epith',spat$labels_fine)))
+
+# table(spat$labels_fine, spat$labels_general)
+```
+
+
+# Viewing labels
+
+We can view how the labels look by comparing them to clusters, viewing in UMAP coordinates, and viewing with the spatial context.
+
+## Clusters {.tabset}
+
+We would expect cell type labels to group strongly with clusters.
+
+
+```{r}
+df <- as.data.frame(table(spat$seurat_clusters, spat$labels_general))
+# df
+
+df$Var1.sum <- NA
+
+for (i in unique(df$Var1)){
+  df[df$Var1 == i,]$Var1.sum <- sum(df[df$Var1 == i,]$Freq)
+}
+
+df$Var2.sum <- NA
+
+for (i in unique(df$Var2)){
+  df[df$Var2 == i,]$Var2.sum <- sum(df[df$Var2 == i,]$Freq)
+}
+
+df$Var1.perc <- df$Freq / df$Var1.sum
+df$Var2.perc <- df$Freq / df$Var2.sum
+
+df$Jaccard <- df$Freq / (df$Var1.sum + df$Var2.sum - df$Freq)
+
+order_ <- c()
+cnts_ <- c()
+for (i in unique(df$Var1)){
+  temp <- df[df$Var1 == i,]
+  order_ <- c(order_,which.max(temp$Freq))
+  cnts_ <- c(cnts_,max(temp$Freq))
+}
+temp <- data.frame(row.names = unique(df$Var1),
+                   order = order_,
+                   cnts = cnts_)
+df$Var1_ordered <- factor(df$Var1,
+                          levels = rownames(temp[order(temp$order, -temp$cnts),]))
+
+df$`Cluster\nPercentage` <- df$Var1.perc
+
+ggplot(df, aes(x = Var1_ordered, y = Var2, label = Freq, fill = `Cluster\nPercentage`)) +
+  geom_tile() +
+  xlab('Clusters') + ylab('Cell Labels') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Clusters vs Predicted Cell Labels')
+```
+
+We see that some clusters are made up of primarily one type of cell (ex. cluster 1 is almost exclusively astro), whereas others show a combination of multipe cell types (ex. cluster 16 is made up in large parts by epith, GABA, and Glu).
+
+## UMAP
+
+Below is the general UMAP plot with the labels added.
+
+```{r}
+DimPlot(spat)
+
+DimPlot(spat, group.by = 'labels_general', label = T)
+```
+
+### Viewing one cell type at a time
+
+```{r}
+cols_ <- scales::hue_pal()(length(unique(spat$labels_general)))
+
+names(cols_) <- levels(as.factor(spat$labels_general))
+```
+
+```{r, fig.show='hold', out.width='50%'}
+for (i in levels(as.factor(spat$labels_general))){
+  # print(i)
+  temp_cols <- ifelse(names(cols_) == i,cols_[i], 'lightgrey')
+  counts_ <- sum(spat$labels_general == i)
+  print(DimPlot(spat, group.by = 'labels_general') +
+          scale_color_manual(values = temp_cols) +
+          ggtitle(paste0(i, ' (n = ',counts_,')')))
+}
+```
+
+## Spatial
+
+Now we are going to look at the labels for the cells with their spatial coordinates
+
+```{r}
+ggplot(spat@meta.data, aes(x= center_x, y = -center_y)) +
+  geom_point(size = .1) +
+  theme_bw() + xlab('') + ylab('')
+```
+
+```{r}
+ggplot(spat@meta.data, aes(x= center_x, y = -center_y, colour = labels_general)) +
+  geom_point(size = .1) +
+  theme_bw() + xlab('') + ylab('') +
+  guides(colour = guide_legend(override.aes= list(size = 4)))
+```
+
+### Viewing one cell type at a time
+
+```{r, fig.show='hold', out.width='50%'}
+temp <- spat@meta.data
+for (i in levels(as.factor(spat$labels_general))){
+  # print(i)
+  temp_cols <- ifelse(names(cols_) == i,cols_[i], 'lightgrey')
+  counts_ <- sum(spat$labels_general == i)
+  temp$order <- temp$labels_general == i
+  temp <- temp[order(temp$order),]
+  temp$size <- ifelse(temp$order, 1,.1)
+  print(ggplot(temp, aes(x= center_x, y = -center_y, colour = labels_general,
+                         size = size)) +
+          geom_point() +
+          scale_size_identity() +
+          theme_bw() + xlab('') + ylab('') +
+          scale_color_manual(values = temp_cols) +
+          guides(colour = guide_legend(override.aes= list(size = 4))))
+}
+
+```
+
