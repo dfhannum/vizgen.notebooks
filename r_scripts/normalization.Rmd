@@ -1,0 +1,649 @@
+---
+title: "Normalization Comparison"
+author: "D. Ford Hannum"
+date: "2023-07-05"
+output: 
+  html_document:
+    toc: true
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+    code_folding: hide
+---
+# Introduction
+
+This file accompanies the Vizgen Analysis Guides: Normalzation.
+
+Here we will compare three normalization methods.
+
+1. Standard (Std) 
+
+2. Seurat SCTransform (SCT)
+
+3. Spatial (Spat)
+
+We chose to run this notebook in R, because of the use of a SCTransform function, which is from the Seurat package which is written in R.
+
+# Loading packages
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat) # to run normalizaiton methods
+library(data.table) # data processing library
+library(ggplot2) # package to make visualizaitons
+```
+
+
+# Loading Data
+
+Here we are going to use publicly available data from a MERSCOPE mouse brain sample.
+
+For our purposes we only need cell_by_gene.csv and cell_metadata.csv files.
+
+```{r}
+md <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_metadata.csv',
+               header = T, data.table = FALSE)
+
+counts <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_by_gene.csv',
+               header = T, data.table = FALSE)
+
+rownames(md) <- md$EntityID 
+rownames(counts) <- counts$cell
+counts <- counts[,-1] # removing cells as a column so we have a data frame of only counts
+blanks <- counts[,grepl('Blank', colnames(counts))] # saving blanks
+counts <- counts[,!grepl('Blank', colnames(counts))] # removing blanks
+
+counts <- t(counts)
+
+# counts[1:5,1:5]
+table(rownames(md) == colnames(counts)) # making sure the data frames align
+```
+
+```{r}
+ggplot(md, aes(x = center_x, y = -center_y)) + 
+  geom_point(size = .1) + theme_bw()
+```
+
+# Seurat Workflow
+
+Using Seurat we will do some basic filtering.
+
+```{r}
+spat <- CreateSeuratObject(counts = counts,
+                           assay = 'RNA',
+                           meta.data = md)
+
+# spat
+```
+
+## Filtering
+
+```{r}
+ggplot(spat@meta.data, aes(x = nCount_RNA)) + 
+  geom_histogram() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 100, linetype = 2, colour = 'red')
+
+spat$keep_cells <- spat$nCount_RNA >= 100
+
+ggplot(spat@meta.data, aes(x = volume, fill = keep_cells)) + 
+  geom_histogram(position = position_dodge2())
+
+ggplot(spat@meta.data, aes(x = volume, y = nCount_RNA,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw() +
+  scale_y_log10()
+
+ggplot(spat@meta.data, aes(x = center_x, y = -center_y,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw()
+
+ggplot(spat@meta.data[spat$keep_cells == FALSE,], aes(x = center_x, y = -center_y,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw()
+```
+
+We see that the distribution of cells that don't pass filtering seems to be relatively evenly distributed throughout the tissue. Therefore our filtering isn't biasing against a particular area of the brain.
+
+There is a more dense area of cells filtered out on the middle-left of the tissue, but that area is also more dense for cells that pass filtering (in general just a more cellular dense area of the tissue)
+
+```{r}
+spat <- subset(spat, nCount_RNA >= 100)
+```
+
+# Normalizations
+
+## Standard (Std)
+
+```{r, message=FALSE}
+spat <- NormalizeData(spat, normalization.method = 'LogNormalize',
+                      scale.factor =  1e4, verbose = F)
+spat <- ScaleData(spat, features = rownames(spat), verbose = F)
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10, verbose = F)
+
+spat <- FindClusters(spat, resolution = .5, verbose = F)
+
+spat <- RunUMAP(spat, dims = 1:10, verbose = F)
+
+spat@meta.data[,paste0('Std_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('Std_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+```{r}
+DimPlot(spat) + ggtitle('Standard (Std) Normalization')
+```
+
+## SCTransform (SCT)
+
+```{r, message = FALSE}
+spat <- SCTransform(spat, clip.range = c(-10,10), vars.to.regress = 'volume',
+                    verbose = F)
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10, verbose = F)
+
+spat <- FindClusters(spat, resolution = .5, verbose = F)
+
+spat <- RunUMAP(spat, dims = 1:10, verbose = F)
+spat@meta.data[,paste0('sct_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('sct_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+
+```{r}
+DimPlot(spat) + ggtitle('SCTransform (SCT) Normalization')
+```
+
+## Spatial (Spat)
+
+Normalization by volume (transcipts per volume (Spat)) will happen outside of Seurat then we will add the data back into Seurat in a new assay. We will divide the counts by the volume and then scale it back to the median volume for all cells (1034).
+
+```{r, message = "FALSE"}
+scale.factor = median(spat$volume)
+transcripts_per_volume <- function(x){
+  x[1:483] /x[484] * scale.factor
+}
+
+# w <- apply(p,2,transcripts_per_volume)
+# tail(w)
+```
+
+```{r}
+spat[['tpv']] <- spat@assays$RNA
+
+DefaultAssay(spat) <- 'tpv'
+
+tpv <- spat@assays$RNA@counts
+
+tpv <- rbind(tpv,spat$volume)
+tpv <- apply(tpv,2,transcripts_per_volume)
+spat@assays$tpv@data <- tpv
+spat <- ScaleData(spat, features = rownames(spat), verbose = F)
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10, verbose = F)
+
+spat <- FindClusters(spat, resolution = .5, verbose = F)
+
+spat <- RunUMAP(spat, dims = 1:10, verbose = F)
+
+spat@meta.data[,paste0('tpv_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('tpv_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+```{r}
+DimPlot(spat) + ggtitle('Spatial (Spat) Normalization')
+```
+
+# Density
+
+Looking at the density of the cells. The "standard" methods adjust for library size, but the Spat (transcripts by volume) method commonly used in FISH data adjusts for volume.
+
+Here we want to see how similar volume and library size are, and base on the figure below there is a high positive correlation between the two.
+
+```{r}
+ggplot(spat@meta.data, aes(x = nCount_RNA, y = volume)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = F) +
+  geom_smooth(se = F) +
+  ggpubr::stat_cor(colour = 'red') +
+  ggpubr::stat_cor(colour = 'green',label.x = 3, label.y = 250,
+                   method = 'spearman') +
+  theme_bw() +
+  scale_x_log10()
+
+```
+
+# Correlation
+
+Here we will look at the pearson correlation for each cell between the three different normalizations (leading to three pairwise comparisons). High correlation indicates a strong similarity between the normalization methods. We will look at the correlations for the entire data, and also by clusters (which were calculated for each normalization method).
+
+```{r}
+x <- spat@assays$RNA@scale.data
+y <- spat@assays$tpv@scale.data
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_tpv_std <- cor_list
+```
+
+```{r}
+x <- spat@assays$SCT@scale.data
+y <- spat@assays$tpv@scale.data[rownames(x),]
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_tpv_sct <- cor_list
+```
+
+```{r}
+x <- spat@assays$SCT@scale.data
+y <- spat@assays$RNA@scale.data[rownames(x),]
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_RNA_sct <- cor_list
+```
+
+## Plots
+
+### Std vs Spat
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_tpv_std)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between Spat and Std')
+
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std, y = RNA_snn_res.0.5,
+                           colour = RNA_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('Std Clusters') +
+  xlab('Correlation between Spat and Std')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std, y = tpv_snn_res.0.5,
+                           colour = tpv_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('Spat Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between Spat and Std')
+
+
+```
+
+We see that there is a high correlation between the Std and Spat normalizations, and all clusters seem to have a similar correlation.
+
+### Std vs SCT
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_RNA_sct)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between SCT and Std')
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct, y = RNA_snn_res.0.5,
+                           colour = RNA_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('Std Clusters') +
+  xlab('Correlation between SCT and Std')
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct, y = SCT_snn_res.0.5,
+                           colour = SCT_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('SCT Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between SCT and Std')
+
+```
+
+We see a slightly lower correlation for Std vs SCT compared to Std vs Spat, but still a significant positive correlation that isn't biased towards certain clusters.
+
+### Spat vs SCT
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_tpv_sct)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between Spat and SCT')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct, y = SCT_snn_res.0.5,
+                           colour = SCT_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('SCT Clusters') +
+  xlab('Correlation between Spat and SCT')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct, y = tpv_snn_res.0.5,
+                           colour = tpv_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('Spat Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between Spat and SCT')
+
+```
+
+Here we see the highest correlation between any two normalization methods
+
+## Conclusions
+
+All in all we see a strong correlation between the scaled data from all three normalization methods. The small differences between the normalization methods may change downstream analyses, but overall shouldn't effect most of them.
+
+# Cluster Comparison
+
+## Cross-Tabulation
+
+We are going to compare the cross-tabulation of the clusters for each cell. If the differences in normalization methods is small we will see relatively direct correspondences between clusters. The correspondence may not be 1-to-1, because the number of clusters varies per method.
+
+### Std vs Spat
+
+```{r}
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$tpv_snn_res.0.5))
+
+tpv_cluster <- c()
+counts_ <- c()
+for (i in unique(x$Var2)){
+  temp <- x[x$Var2 == i,]
+  cluster <- as.character(temp[which.max(temp$Freq),]$Var1)
+  count <- temp[which.max(temp$Freq),]$Freq
+  tpv_cluster <- c(tpv_cluster, cluster)
+  counts_ <- c(counts_, count)
+}
+
+clusters <- data.frame(row.names = unique(x$Var2),
+           counts = counts_,
+           tpv_cluster = as.numeric(tpv_cluster))
+clusters <- clusters[order(clusters$tpv_cluster, -clusters$counts),]
+clusters$clusters <- 0:(dim(clusters)[1] -1)
+
+# levels(spat$tpv_snn_res.0.5)
+spat$tpv_snn_res.0.5_renamed <- factor(spat$tpv_snn_res.0.5,
+                                       labels = clusters[paste0(0:20),]$clusters)
+spat$tpv_snn_res.0.5_renamed <- factor(spat$tpv_snn_res.0.5_renamed,
+                                       levels = 0:20)
+
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$tpv_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('Std Clusters') + ylab('Spat Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+# 
+# ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+#               fill = Jaccard)) +
+#   geom_tile() +
+#   xlab('Std Clusters') + ylab('Spat Clusters') +
+#   geom_text(size = 3) +
+#   scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+#                        midpoint = .5) +
+#   ggtitle('Cross-Tabulation with Jaccard Index per Cluster')
+```
+
+### Std vs SCT
+
+```{r}
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$SCT_snn_res.0.5))
+
+SCT_cluster <- c()
+counts_ <- c()
+for (i in unique(x$Var2)){
+  temp <- x[x$Var2 == i,]
+  cluster <- as.character(temp[which.max(temp$Freq),]$Var1)
+  count <- temp[which.max(temp$Freq),]$Freq
+  SCT_cluster <- c(SCT_cluster, cluster)
+  counts_ <- c(counts_, count)
+}
+
+clusters <- data.frame(row.names = unique(x$Var2),
+           counts = counts_,
+           SCT_cluster = as.numeric(SCT_cluster))
+clusters <- clusters[order(clusters$SCT_cluster, -clusters$counts),]
+clusters$clusters <- 0:(dim(clusters)[1] -1)
+
+# levels(spat$SCT_snn_res.0.5)
+# clusters
+spat$SCT_snn_res.0.5_renamed <- factor(spat$SCT_snn_res.0.5,
+                                       labels = clusters[paste0(0:(dim(clusters)[1]-1)),]$clusters)
+spat$SCT_snn_res.0.5_renamed <- factor(spat$SCT_snn_res.0.5_renamed,
+                                       levels = 0:(dim(clusters)[1]-1))
+
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$SCT_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('Std Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+
+# ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+#               fill = Jaccard)) +
+#   geom_tile() +
+#   xlab('Std Clusters') + ylab('SCT Clusters') +
+#   geom_text(size = 3) +
+#   scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+#                        midpoint = .5) +
+#   ggtitle('Cross-Tabulation of Jaccard Index per Cluster')
+```
+
+### Spat vs SCT
+
+```{r}
+
+x <- as.data.frame(table(spat$tpv_snn_res.0.5_renamed, spat$SCT_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('Spat Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+# 
+# ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+#               fill = Jaccard)) +
+#   geom_tile() +
+#   xlab('Spat Clusters') + ylab('SCT Clusters') +
+#   geom_text(size = 3) +
+#   scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+#                        midpoint = .5) +
+#   ggtitle('Cross-Tabulation of Jaccard Index per Cluster')
+```
+
+### Conclusions
+
+For the most part we see a pretty overlapping occupancy of clusters (one-to-one correspondance, and the strong diagonal stripe).
+
+## Correlation
+
+Here we will compare the cluster centroids by correlation (Pearson).
+
+```{r}
+cent <- list()
+cent[['Std']] <- AverageExpression(spat,group.by = 'RNA_snn_res.0.5',
+                                   assays = 'RNA', slot = 'scale.data')$RNA
+cent[['tpv']] <- AverageExpression(spat,group.by = 'tpv_snn_res.0.5_renamed',
+                                   assays = 'tpv', slot = 'scale.data')$tpv
+cent[['sct']] <- AverageExpression(spat,group.by = 'SCT_snn_res.0.5_renamed',
+                                   assays = 'SCT', slot = 'scale.data')$SCT
+
+centroid_corr <- list()
+centroid_corr[['Std_vs_tpv']] <- cor(cent[['Std']], cent[['tpv']], method = 'pearson')
+
+centroid_corr[['Std_vs_sct']] <- cor(cent[['Std']], cent[['sct']], method = 'pearson')
+
+centroid_corr[['tpv_vs_sct']] <- cor(cent[['tpv']], cent[['sct']], method = 'pearson')
+
+```
+
+### Std vs Spat
+
+```{r}
+i <- 1
+name <- names(centroid_corr[i])
+
+df <- centroid_corr[[i]]
+df <- reshape2::melt(df)
+
+x_name <- tstrsplit(name,'_',keep = 1)[[1]]
+y_name <- tstrsplit(name,'_', keep = 3)[[1]]
+# df
+ggplot(df, aes(x = Var1, y = Var2, fill = value, label = round(value,2))) +
+         geom_tile() +
+         scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red',
+                              midpoint = mean(df$value)) +
+  theme_minimal() +
+  xlab(paste0(x_name, ' cluster centroids')) +
+  ylab(paste0(y_name, ' cluster centroids')) +
+  geom_text(size = 2)
+
+```
+
+### Std vs SCT
+
+```{r}
+i <- 2
+name <- names(centroid_corr[i])
+
+df <- centroid_corr[[i]]
+df <- reshape2::melt(df)
+
+x_name <- tstrsplit(name,'_',keep = 1)[[1]]
+y_name <- tstrsplit(name,'_', keep = 3)[[1]]
+# df
+ggplot(df, aes(x = Var1, y = Var2, fill = value, label = round(value,2))) +
+         geom_tile() +
+         scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red',
+                              midpoint = mean(df$value)) +
+  theme_minimal() +
+  xlab(paste0(x_name, ' cluster centroids')) +
+  ylab(paste0(y_name, ' cluster centroids')) +
+  geom_text(size = 2)
+
+```
+
+### Spat vs SCT
+
+```{r}
+i <- 3
+name <- names(centroid_corr[i])
+
+df <- centroid_corr[[i]]
+df <- reshape2::melt(df)
+
+x_name <- tstrsplit(name,'_',keep = 1)[[1]]
+y_name <- tstrsplit(name,'_', keep = 3)[[1]]
+# df
+ggplot(df, aes(x = Var1, y = Var2, fill = value, label = round(value,2))) +
+         geom_tile() +
+         scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red',
+                              midpoint = mean(df$value)) +
+  theme_minimal() +
+  xlab(paste0(x_name, ' cluster centroids')) +
+  ylab(paste0(y_name, ' cluster centroids')) +
+  geom_text(size = 2)
+
+```
+
+### Conclusions
+
+It may come as no surprise since this is a similar analysis but the results of the cluster correlations close resembles the results for the cross-tabulation of clusters. Once again we see general correspondence between the three methods.
+
+# SessionInfo
+
+```{r}
+# saveRDS(spat, '/Users/DouglasHannumJr/Desktop/s3_bucket_data/s3_bucket_data/spat.Rds')
+# spat <- readRDS('/Users/DouglasHannumJr/Desktop/s3_bucket_data/s3_bucket_data/spat.Rds')
+```
+
+
+```{r}
+sessionInfo()
+```
+

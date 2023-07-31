@@ -1,0 +1,417 @@
+---
+title: "MERSCOPE w/ Seurat"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+---
+
+```{r setup, include=TRUE, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+# knitr::opts_knit$set(root.dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/')
+library(Seurat)
+
+# install.packages('arrow')
+# install.packages('wkb')
+# install.packages('sf')
+
+library(arrow) # for downloading the parquet file
+library(wkb) # for transferring coordinates from "binary" 
+library(sf) # process tools for spatial data
+library(ggplot2)
+```
+
+# Introduction
+
+The [Seurat vignette](https://satijalab.org/seurat/articles/spatial_vignette_2.html) for MERSCOPE data uses Vizgen's previous data format for cell segmentation (hdf5 file for each FOV). The function LoadVizgen() is not currently able to load the new parquet format for cell segmentation, but this notebook demonstrates an alternate approach to load the segmentation data."
+
+Here we'll walk through how to update that vignette with the new output file format (parquet).
+
+# Loading data
+
+We are running this on a different sample/replicate than run previously in the tutorial, and it's processed differently than previous samples.
+
+Below are the files we will use to run the analysis.
+
+```{r}
+document_start_time <- Sys.time()
+# getwd()
+root_dir <- '/Users/DouglasHannumJr/Desktop/mouse_brain_showcase_s1r1/'
+
+list.files(root_dir)
+```
+
+# Processing segmentation file
+
+The file provides 3D segmentation of cells, and as far as we know Seurat doesn't support this 3D segmentation. Below we are going to filter to just one segmentation per cell.
+
+For this analysis we are going to take the middle z-plane (z = 3) for cells that pass through z = 3 and the first segmentation result for any cell that doesn't pass through the middle plane.
+
+```{r}
+# Loading the parquet file
+segmentation <- arrow::read_parquet(paste0(root_dir, 'cell_boundaries.parquet'))
+
+# Getting all cell ids
+cell_ids <- unique(segmentation$EntityID)
+
+# Getting cell ids for cells passing through z3
+cell_ids_z3 <- unique(segmentation[segmentation$ZIndex == 3,]$EntityID)
+
+# Getting the remaining cell ids
+cell_ids_otherZ <- cell_ids[!(cell_ids %in% cell_ids_z3)]
+
+# Getting z3 segmentations
+z3_segmentation <- segmentation[segmentation$ZIndex == 3,]
+
+# Getting segmentations for z0 or z6 for remaining cells
+zOther_segmentation <- segmentation[segmentation$EntityID %in% cell_ids_otherZ,]
+
+# Only taking the first segmentation for each cell 
+zOther_segmentation <- zOther_segmentation[!duplicated(zOther_segmentation$EntityID),]
+
+# Combining the segmentaitons
+combined_segmentation <- rbind(z3_segmentation,zOther_segmentation)
+
+# Showing that we capture all cells with this strategy
+dim(combined_segmentation)[1] == length(cell_ids)
+
+# Since cell ID is unique we are going to use that to index the dataframe
+combined_segmentation <- as.data.frame(combined_segmentation)
+rownames(combined_segmentation) <- combined_segmentation$EntityID
+
+# Ordering the combined_segmentation by the original order
+combined_segmentation <- combined_segmentation[as.character(cell_ids),]
+
+# dim(combined_segmentation)
+# combined_segmentation
+```
+
+Next we are going to get the coordinates for the vertices of the segmentation polygons.
+
+```{r}
+segmentation <- st_as_sf(combined_segmentation)
+
+# Pulling out a coordinate matrix for each segmentaiton
+coordinates_ <- lapply(segmentation$Geometry, FUN = sf::st_coordinates)
+
+for (i in 1){
+  x <- coordinates_[[i]]
+}
+coordinates_ <- lapply(coordinates_, FUN = function(x){x[,1:2]})
+
+head(coordinates_[[1]])
+# Getting a count of vertices for each segmentation
+coordinates_labels <- lapply(segmentation$Geometry,
+                             function(x){nrow(sf::st_coordinates(x))})
+
+# Combining the matrices
+coordinates_ <- do.call(rbind, coordinates_)
+
+# Adding the vertices count
+segmentation$rep <- do.call(c,coordinates_labels)
+
+coordinates_ <- as.data.frame(coordinates_)
+
+# Adding the metadata to the coordinates_ dataframe
+coordinates_$cell <- rep(segmentation$EntityID, segmentation$rep)
+```
+
+## Alternative
+
+This is my adapted script from the [current pull request](https://github.com/satijalab/seurat/pull/7190/files) (05/11/23) for Seurat. They use a different package to read in the data which already transforms the Geometry coordinates into a readable format.
+
+```{r}
+# Loading the parquet file
+segmentation <- sfarrow::st_read_parquet(paste0(root_dir, 'cell_boundaries.parquet'))
+
+# Getting all cell ids
+cell_ids <- unique(segmentation$EntityID)
+
+# Getting cell ids for cells passing through z3
+cell_ids_z3 <- unique(segmentation[segmentation$ZIndex == 3,]$EntityID)
+
+# Getting the remaining cell ids
+cell_ids_otherZ <- cell_ids[!(cell_ids %in% cell_ids_z3)]
+
+# Getting z3 segmentations
+z3_segmentation <- segmentation[segmentation$ZIndex == 3,]
+
+# Getting segmentations for z0 or z6 for remaining cells
+zOther_segmentation <- segmentation[segmentation$EntityID %in% cell_ids_otherZ,]
+
+# Only taking the first segmentation for each cell 
+zOther_segmentation <- zOther_segmentation[!duplicated(zOther_segmentation$EntityID),]
+
+# Combining the segmentaitons
+combined_segmentation <- rbind(z3_segmentation,zOther_segmentation)
+
+# Showing that we capture all cells with this strategy
+dim(combined_segmentation)[1] == length(cell_ids)
+
+# Since cell ID is unique we are going to use that to index the dataframe
+combined_segmentation <- as.data.frame(combined_segmentation)
+rownames(combined_segmentation) <- combined_segmentation$EntityID
+
+# Ordering the combined_segmentation by the original order
+combined_segmentation <- combined_segmentation[as.character(cell_ids),]
+
+# dim(combined_segmentation)
+# combined_segmentation
+```
+
+Next we are going to get the coordinates for the vertices of the segmentation polygons.
+
+```{r}
+segmentation <- st_as_sf(combined_segmentation)
+
+# Pulling out a coordinate matrix for each segmentaiton
+coordinates_ <- lapply(segmentation$Geometry, FUN = sf::st_coordinates)
+
+for (i in 1){
+  x <- coordinates_[[i]]
+}
+coordinates_ <- lapply(coordinates_, FUN = function(x){x[,1:2]})
+
+head(coordinates_[[1]])
+# Getting a count of vertices for each segmentation
+coordinates_labels <- lapply(segmentation$Geometry,
+                             function(x){nrow(sf::st_coordinates(x))})
+
+# Combining the matrices
+coordinates_ <- do.call(rbind, coordinates_)
+
+# Adding the vertices count
+segmentation$rep <- do.call(c,coordinates_labels)
+
+coordinates_ <- as.data.frame(coordinates_)
+
+# Adding the metadata to the coordinates_ dataframe
+coordinates_$cell <- rep(segmentation$EntityID, segmentation$rep)
+```
+
+# Creating the Seurat object
+
+```{r}
+# Loading count data
+counts <- as.data.frame(data.table::fread(paste0(root_dir,
+                                                 './cell_by_gene.csv')))
+
+# Creating a count matrix
+rownames(counts) <- as.character(counts[,1])
+counts <- counts[,-1]
+
+# Pulling out a matrix of blank counts
+blanks <- counts[,grepl('Blank', colnames(counts))]
+
+# Removing blanks from the count matrix
+counts <- counts[,!grepl('Blank', colnames(counts))]
+
+# Loading the metadata file
+md <- as.data.frame(data.table::fread(paste0(root_dir,
+                                             './cell_metadata.csv')))
+
+colnames(md)[1] <- 'EntityID'
+rownames(md) <- md[,1]
+
+# Transposing/rotating the counts file to fit Seurat convention
+counts <- t(counts)
+
+# Creating the seurat object
+spat <- CreateSeuratObject(counts = counts,
+                           meta.data = md, 
+                           assay = 'Vizgen')
+```
+
+
+## Adding in spatial information
+
+[This blog post](https://divingintogeneticsandgenomics.rbind.io/post/how-to-construct-a-spatial-object-in-seurat/) was helpful in figuring out how to add spatial information to an existing Seurat object.
+
+This may not be the optimal way to load segmentation data into a Seurat object, and we'll look later into improving the method.
+
+```{r}
+# Creating a centroid assay to visualize data in Seurat
+# for most visualizations this is all you would need unless
+# you wanted to interrogate the segmentation further
+
+centroids <- md[,c('center_x','center_y','EntityID')]
+colnames(centroids) <- c('x','y','cell')
+
+# Updating the segmentation file to follow Seurat convention
+coordinates_sub <- coordinates_[,c('X','Y','cell')]
+colnames(coordinates_sub)[1:2] <- c('x','y')
+
+# Aligning spatial data to cells in the Seurat object
+centroids <- ce
+
+# Creating the objects compatible with Seurat
+coords <- CreateSegmentation(coordinates_sub)
+cents <- CreateCentroids(centroids)
+
+# Combining the spatial Seurat objects
+segmentation.data <- list(
+  "centroids" = cents,
+  "segmentation" = coords
+)
+
+# Loading the transcript data
+transcripts <- as.data.frame(data.table::fread(paste0(root_dir,"partitioned_transcripts.csv")))
+
+transcripts_sub <- transcripts[,c('global_x','global_y',
+                                  'gene','cell_id')]
+
+colnames(transcripts_sub) <- c('x','y','gene','cell')
+
+# Turning the spatial Seurat objects into one "FOV" image
+coords <- CreateFOV(
+  coords = segmentation.data,
+  type = c('segmentation','centroids'),
+  molecules = transcripts_sub,
+  assay = 'Vizgen'
+)
+
+spat[['image']] <- coords
+```
+
+
+
+# Basic Processing Workflow
+
+```{r}
+# Normalizing the data
+spat <- SCTransform(spat, assay = 'Vizgen',
+                    clip.range = c(-10,10))
+
+# Finding principal components of the data
+spat <- RunPCA(spat, npcs = 30, features = rownames(spat))
+
+# Generating UMAP coordinates for cells
+spat <- RunUMAP(spat, dims = 1:30)
+
+# Finding similar cells and clustering them together
+spat <- FindNeighbors(spat, reduction = 'pca', dims = 1:30)
+spat <- FindClusters(spat, resolution = 0.3) 
+```
+
+# Visualizaitons
+
+```{r}
+# Viewing the data with UMAP 
+DimPlot(spat, reduction = 'umap')
+```
+
+
+```{r}
+# Viewing cell clusters based on spatial location
+ImageDimPlot(spat, fov = 'image', cols = 'polychrome', axes = TRUE)
+```
+
+```{r}
+# Viewing where clusters 14 & 15 locate spatially
+p1 <- ImageDimPlot(spat, fov = "image", cols = "red", cells = WhichCells(spat, idents = 14))
+p2 <- ImageDimPlot(spat, fov = "image", cols = "red", cells = WhichCells(spat, idents = 15))
+p1 + p2
+```
+
+
+```{r}
+# had to increase the global memory for cropping
+options(future.globals.maxSize = 8000*1024^2)
+
+# cropping the image to a subsection 
+cropped.coords <- Crop(spat[['image']],
+                       x = c(1500,2000),
+                       y = c(7000,7500),
+                       coords = 'plot')
+
+# adding that subsection to an FOV in the Seurat object
+spat[['subset']] <- cropped.coords
+```
+
+
+```{r}
+# Plotting the cell centroids in the subset FOV
+p1 <- ImageDimPlot(spat, fov = 'subset', axes = TRUE, size = 0.7,
+             border.color = 'white', cols = 'polychrome',
+             coord.fixed = TRUE)
+p1
+```
+
+```{r}
+# Plotting the cell segmentation in the subset FOV
+p2 <- ImageDimPlot(spat, fov = 'subset', axes = TRUE, border.size = .1,
+             border.color = 'white', cols = 'polychrome',
+             coord.fixed = TRUE, boundaries = 'segmentation')
+p2
+```
+
+Currently, we are able to run the Simplify command but unable to plot the resulting segmentation do to missing values for some segmentations.
+
+```{r}
+# spat[["subset"]][["simplified.segmentations"]] <- Simplify(coords = spat[["subset"]][["segmentation"]], tol = 5)
+# 
+# 
+# 
+# x <- spat[['subset']][['simplified.segmentations']]@polygons
+# for (i in x){
+#   plot(i)
+#   break
+# }
+# 
+# p3 <- ImageDimPlot(spat, fov = 'subset', axes = TRUE, border.size = .1,
+#              border.color = 'white', cols = 'polychrome',
+#              coord.fixed = TRUE, boundaries = 'simplified.segmentation')
+# p3
+```
+
+
+Showing the cell centroid and segmentation side-by-side.
+
+```{r}
+p1 + p2
+```
+
+Plotting transcripts (molecules) along with the segmentation in the subset FOV.
+
+```{r}
+# Cells colored by cluster
+ImageDimPlot(spat, molecules = c("Oxgr1", "Htr1a", "Htr1b"),
+             nmols = 1e4, coord.fixed = T, fov = 'subset',
+             border.color = 'white', border.size = .1,
+             boundaries = 'segmentation',alpha = .3,mols.size = 1,
+             cols = 'polychrome')
+
+# Cells not colored
+ImageDimPlot(spat, molecules = c("Oxgr1", "Htr1a", "Htr1b"),
+             nmols = 1e4, coord.fixed = T, fov = 'subset',
+             border.color = 'white', border.size = .1,
+             group.by = 'orig.ident',
+             boundaries = 'segmentation',alpha = .3,mols.size = 1,
+             cols = 'polychrome')
+
+```
+
+# Session Information
+
+Printing how long the process took
+
+```{r}
+end_time <- Sys.time()
+
+end_time - document_start_time
+```
+
+```{r}
+sessionInfo()
+```
+
+```{r}
+# saveRDS(spat, '../data/mouse_brain_showcase/seurat_object.Rds')
+```
+
+```{r}
+# spat <- readRDS('../data/mouse_brain_showcase/seurat_object.Rds')
+```

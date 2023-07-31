@@ -1,0 +1,1073 @@
+---
+title: "Normalization Comparison"
+author: "D. Ford Hannum"
+date: "2023-07-05"
+output: 
+  html_document:
+    toc: true
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+    code_folding: hide
+---
+# Introduction
+
+This file accompanies the Vizgen Analysis Guides: Normalzation.
+
+Here we will compare the differences between three normalization methods.
+
+1. "Standard" 
+
+2. "Seurat SCT"
+
+3. "Spatial"
+
+We chose to run this notebook in R, because of the use of a SCTransform function, which is from the Seurat package which is written in R. A future version with Python is planned [future link]().
+
+# Loading packages
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Seurat) # to run normalizaiton methods
+# install.packages('aws.s3')
+library(aws.s3) # to access data from a public AWS bucket
+library(data.table) # data processing library
+library(ggplot2) # package to make visualizaitons
+```
+
+
+# Loading Data
+
+Here we are going to use publicaly available data from a MERSCOPE mouse brain sample.
+
+```{r}
+# # The path to the s3 bucket
+# s3_bucket_path = "s3://vzg-vzg-showcase-data/Mouse_Brain_Showcase_232/Slice-1_Replicate_1"
+# 
+# # Verifying the bucket exists
+# bucket_exists(bucket = s3_bucket_path,
+#               region = 'us-east-1')[1]
+# 
+# get_bucket_df(bucket = s3_bucket_path,
+#               region = 'us-east-1')
+```
+
+For our purposes we only need cell_by_gene.csv and cell_metadata.csv files.
+
+```{r}
+md <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_metadata.csv',
+               header = T, data.table = FALSE)
+
+counts <- fread('https://vzg-vzg-showcase-data.s3.amazonaws.com/Mouse_Brain_Showcase_232/Slice-1_Replicate-1/cell_by_gene.csv',
+               header = T, data.table = FALSE)
+
+rownames(md) <- md$EntityID 
+rownames(counts) <- counts$cell
+counts <- counts[,-1] # removing cells as a column so we have a data frame of only counts
+blanks <- counts[,grepl('Blank', colnames(counts))]
+counts <- counts[,!grepl('Blank', colnames(counts))] # removing blanks
+
+counts <- t(counts)
+
+counts[1:5,1:5]
+table(rownames(md) == colnames(counts)) # making sure the data frames align
+```
+
+```{r}
+ggplot(md, aes(x = center_x, y = -center_y)) + 
+  geom_point(size = .1) + theme_bw()
+```
+
+## Subsetting for testing
+
+```{r}
+# md <- md[md$center_x < 2500 & md$center_y < 3000,]
+
+# ggplot(md, aes(x = center_x, y = -center_y)) + 
+#   geom_point(size = .1) + theme_bw()
+# 
+# # dim(md)
+# 
+# counts <- counts[,rownames(md)]
+# dim(counts)
+```
+# Seurat Workflow
+
+Using Seurat
+
+```{r}
+spat <- CreateSeuratObject(counts = counts,
+                           assay = 'RNA',
+                           meta.data = md)
+
+spat
+```
+
+## Filtering
+
+```{r}
+ggplot(spat@meta.data, aes(x = nCount_RNA)) + 
+  geom_histogram() + 
+  scale_x_log10() + 
+  geom_vline(xintercept = 100, linetype = 2, colour = 'red')
+
+spat$keep_cells <- spat$nCount_RNA >= 100
+
+ggplot(spat@meta.data, aes(x = volume, fill = keep_cells)) + 
+  geom_histogram(position = position_dodge2())
+
+ggplot(spat@meta.data, aes(x = volume, y = nCount_RNA,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw() +
+  scale_y_log10()
+
+ggplot(spat@meta.data, aes(x = center_x, y = -center_y,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw()
+
+ggplot(spat@meta.data[spat$keep_cells == FALSE,], aes(x = center_x, y = -center_y,
+                           colour = keep_cells)) +
+  geom_point(size = .1) +
+  theme_bw()
+```
+
+We see that the distribution of cells that don't pass filtering seems to be relatively evenly distributed throughout the tissue. Therefore our filtering isn't biasing against a particular area of the brain.
+
+There is a more dense area of cells filtered out on the middle-left of the tissue, but that area is also more dense for cells that pass filtering (in general just a more cellular dense area of the tissue)
+
+```{r}
+spat <- subset(spat, nCount_RNA >= 100)
+```
+
+# Normalizations
+
+## Standard
+
+```{r}
+spat <- NormalizeData(spat, normalization.method = 'LogNormalize',
+                      scale.factor =  1e4)
+spat <- ScaleData(spat, features = rownames(spat))
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10)
+
+spat <- FindClusters(spat, resolution = .5)
+
+spat <- RunUMAP(spat, dims = 1:10)
+
+spat@meta.data[,paste0('std_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('std_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+## SCTransform
+
+```{r}
+spat <- SCTransform(spat, clip.range = c(-10,10), vars.to.regress = 'volume')
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10)
+
+spat <- FindClusters(spat, resolution = .5)
+
+spat <- RunUMAP(spat, dims = 1:10)
+```
+```{r}
+spat@reductions$umap
+```
+
+```{r}
+spat@meta.data[,paste0('sct_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('sct_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+## Spatial -volume
+
+Going to "hack" Seurat to do this
+
+```{r}
+transcripts_per_volume <- function(x){
+  x[1:483] /x[484] * 250
+}
+
+# w <- apply(p,2,transcripts_per_volume)
+# tail(w)
+```
+
+```{r}
+
+spat[['tpv']] <- spat@assays$RNA
+
+DefaultAssay(spat) <- 'tpv'
+
+tpv <- spat@assays$RNA@counts
+
+# for (i in 1:dim(tpv)[2]){
+#   tpv[,i] <- tpv[,i]/spat$volume[i] * 250
+# }
+tpv <- rbind(tpv,spat$volume)
+tpv <- apply(tpv,2,transcripts_per_volume)
+spat@assays$tpv@data <- tpv
+spat <- ScaleData(spat, features = rownames(spat))
+
+spat <- RunPCA(spat, features = rownames(spat), verbose = FALSE)
+
+spat <- FindNeighbors(spat, dims = 1:10)
+
+spat <- FindClusters(spat, resolution = .5)
+
+spat <- RunUMAP(spat, dims = 1:10)
+
+spat@meta.data[,paste0('tpv_pca',1:5)] <- spat@reductions$pca@cell.embeddings[,1:5]
+spat@meta.data[,paste0('tpv_umap',1:2)] <- spat@reductions$umap@cell.embeddings
+```
+
+# Density
+
+Looking at the density of the cells. The "standard" methods adjust for library size, but the TPV (transcripts by volume) method commonly used in FISH data adjusts for volume.
+
+Here we want to see how concordant/similar volume and library size are.
+
+```{r}
+ggplot(spat@meta.data, aes(x = nCount_RNA, y = volume)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = F) +
+  geom_smooth(se = F) +
+  ggpubr::stat_cor(colour = 'red') +
+  ggpubr::stat_cor(colour = 'green',label.x = 3, label.y = 250,
+                   method = 'spearman') +
+  theme_bw() +
+  scale_x_log10()
+
+```
+
+# Correlation
+
+```{r}
+x <- spat@assays$RNA@scale.data
+y <- spat@assays$tpv@scale.data
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_tpv_std <- cor_list
+```
+
+```{r}
+x <- spat@assays$SCT@scale.data
+y <- spat@assays$tpv@scale.data[rownames(x),]
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_tpv_sct <- cor_list
+```
+
+```{r}
+x <- spat@assays$SCT@scale.data
+y <- spat@assays$RNA@scale.data[rownames(x),]
+
+cor_list <- c()
+for (i in 1:dim(x)[2]){
+  # if (i %% 500 == 0){print(paste0(i,' out of ',dim(x)[2]))}
+  cor_list <- c(cor_list,cor(x[,i],y[,i], method = 'pearson'))
+}
+
+spat$cor_RNA_sct <- cor_list
+```
+
+Two genes were removed from the SCT
+
+```{r}
+# rownames(spat)[!(rownames(spat) %in% rownames(x))]
+```
+
+```{r}
+# colnames(spat@meta.data)
+```
+
+## Plots
+
+```{r}
+# colnames(spat@meta.data)
+```
+
+### CPM vs TPV
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_tpv_std)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between TPV and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std)) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab('Correlation between TPV and CPM')
+
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std, y = RNA_snn_res.0.5,
+                           colour = RNA_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('CPM Clusters') +
+  xlab('Correlation between TPV and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std, y = tpv_snn_res.0.5,
+                           colour = tpv_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('TPV Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between TPV and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std,
+                           y = nCount_RNA)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = cor_tpv_std,
+                           y = volume)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = nCount_RNA, 
+                           y = volume,
+                           colour = cor_tpv_std)) +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey',
+                       high = 'red', midpoint = median(spat$cor_tpv_std)) +
+  geom_point(alpha = .1) +
+  scale_x_log10() +
+  theme_bw() 
+```
+
+### CPM vs SCTransform
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_RNA_sct)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between SCT and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct)) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab('Correlation between SCT and CPM')
+
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct, y = RNA_snn_res.0.5,
+                           colour = RNA_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('CPM Clusters') +
+  xlab('Correlation between SCT and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct, y = tpv_snn_res.0.5,
+                           colour = SCT_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('SCT Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between SCT and CPM')
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct,
+                           y = nCount_RNA)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = cor_RNA_sct,
+                           y = volume)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = nCount_RNA, 
+                           y = volume,
+                           colour = cor_RNA_sct)) +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey',
+                       high = 'red', midpoint = median(spat$cor_RNA_sct)) +
+  geom_point(alpha = .1) +
+  scale_x_log10() +
+  theme_bw() 
+```
+
+### TPV vs SCTransform
+
+```{r}
+ggplot(spat@meta.data, aes(x = cor_tpv_sct)) + 
+  geom_histogram() +
+  theme_bw() +
+  xlab('Correlation between TPV and SCT')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct)) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab('Correlation between TPV and SCT')
+
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct, y = RNA_snn_res.0.5,
+                           colour = SCT_snn_res.0.5)) + 
+  geom_boxplot() +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  ylab('SCT Clusters') +
+  xlab('Correlation between TPV and SCT')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct, y = tpv_snn_res.0.5,
+                           colour = tpv_snn_res.0.5)) + 
+  geom_boxplot() +
+  ylab('TPV Clusters') +
+  theme_bw() +
+  theme(legend.position = 'none') +
+  xlab('Correlation between TPV and SCT')
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct,
+                           y = nCount_RNA)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = cor_tpv_sct,
+                           y = volume)) +
+  geom_point(alpha = .1) +
+  scale_y_log10() +
+  theme_bw() +
+  ggpubr::stat_cor()
+
+ggplot(spat@meta.data, aes(x = nCount_RNA, 
+                           y = volume,
+                           colour = cor_tpv_sct)) +
+  scale_color_gradient2(low = 'blue', mid = 'lightgrey',
+                       high = 'red', midpoint = median(spat$cor_tpv_sct)) +
+  geom_point(alpha = .1) +
+  scale_x_log10() +
+  theme_bw() 
+```
+
+# Cluster Comparison
+
+## CPM vs TPV
+
+```{r}
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$tpv_snn_res.0.5))
+
+tpv_cluster <- c()
+counts_ <- c()
+for (i in unique(x$Var2)){
+  temp <- x[x$Var2 == i,]
+  cluster <- as.character(temp[which.max(temp$Freq),]$Var1)
+  count <- temp[which.max(temp$Freq),]$Freq
+  tpv_cluster <- c(tpv_cluster, cluster)
+  counts_ <- c(counts_, count)
+}
+
+clusters <- data.frame(row.names = unique(x$Var2),
+           counts = counts_,
+           tpv_cluster = as.numeric(tpv_cluster))
+clusters <- clusters[order(clusters$tpv_cluster, -clusters$counts),]
+clusters$clusters <- 0:(dim(clusters)[1] -1)
+
+# levels(spat$tpv_snn_res.0.5)
+spat$tpv_snn_res.0.5_renamed <- factor(spat$tpv_snn_res.0.5,
+                                       labels = clusters[paste0(0:20),]$clusters)
+spat$tpv_snn_res.0.5_renamed <- factor(spat$tpv_snn_res.0.5_renamed,
+                                       levels = 0:20)
+
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$tpv_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('TPV Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+
+ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+              fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('TPV Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Jaccard Index per Cluster')
+```
+
+## CPM vs SCT
+
+```{r}
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$SCT_snn_res.0.5))
+
+SCT_cluster <- c()
+counts_ <- c()
+for (i in unique(x$Var2)){
+  temp <- x[x$Var2 == i,]
+  cluster <- as.character(temp[which.max(temp$Freq),]$Var1)
+  count <- temp[which.max(temp$Freq),]$Freq
+  SCT_cluster <- c(SCT_cluster, cluster)
+  counts_ <- c(counts_, count)
+}
+
+clusters <- data.frame(row.names = unique(x$Var2),
+           counts = counts_,
+           SCT_cluster = as.numeric(SCT_cluster))
+clusters <- clusters[order(clusters$SCT_cluster, -clusters$counts),]
+clusters$clusters <- 0:(dim(clusters)[1] -1)
+
+# levels(spat$SCT_snn_res.0.5)
+# clusters
+spat$SCT_snn_res.0.5_renamed <- factor(spat$SCT_snn_res.0.5,
+                                       labels = clusters[paste0(0:(dim(clusters)[1]-1)),]$clusters)
+spat$SCT_snn_res.0.5_renamed <- factor(spat$SCT_snn_res.0.5_renamed,
+                                       levels = 0:(dim(clusters)[1]-1))
+
+x <- as.data.frame(table(spat$RNA_snn_res.0.5, spat$SCT_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+
+ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+              fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Jaccard Index per Cluster')
+```
+
+## TPV vs SCT
+
+```{r}
+
+x <- as.data.frame(table(spat$tpv_snn_res.0.5_renamed, spat$SCT_snn_res.0.5_renamed))
+
+
+x$Var1.sum <- NA
+
+for (i in unique(x$Var1)){
+  x[x$Var1 == i,]$Var1.sum <- sum(x[x$Var1 == i,]$Freq)
+}
+
+x$Var2.sum <- NA
+
+for (i in unique(x$Var2)){
+  x[x$Var2 == i,]$Var2.sum <- sum(x[x$Var2 == i,]$Freq)
+}
+
+x$Var1.perc <- x$Freq / x$Var1.sum
+x$Var2.perc <- x$Freq / x$Var2.sum
+
+x$Jaccard <- x$Freq / (x$Var1.sum + x$Var2.sum - x$Freq)
+
+ggplot(x, aes(x = Var1, y = Var2, label = Freq, fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Counts per Cluster')
+
+ggplot(x, aes(x = Var1, y = Var2, label = round(Jaccard, 2),
+              fill = Jaccard)) +
+  geom_tile() +
+  xlab('CPM Clusters') + ylab('SCT Clusters') +
+  geom_text(size = 3) +
+  scale_fill_gradient2(low = 'white', mid = "pink", high = 'red',
+                       midpoint = .5) +
+  ggtitle('Cross-Tabulation of Jaccard Index per Cluster')
+```
+
+# Recreating Seurat figure 
+
+From their SCTransform [paper](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1874-1)
+
+```{r}
+DefaultAssay(spat) <- 'RNA'
+```
+
+![Figure 1](C:\Users\DouglasHannumJr\Downloads\13059_2019_1874_Fig1_HTML.jpeg)
+
+## 1A
+
+Total UMI histogram
+
+```{r}
+ggplot(spat@meta.data, aes(x = nCount_RNA)) +
+  geom_histogram() +
+  scale_x_log10() +
+  theme_bw()
+```
+
+Has a similar normal distribution, but not quite as clean.
+
+### TPV
+
+Total cell size distribution
+
+```{r}
+ggplot(spat@meta.data, aes(x = volume)) +
+  geom_histogram() +
+  scale_x_log10() +
+  theme_bw()
+```
+
+## 1B
+
+Binning mean gene expression
+
+```{r}
+
+```
+
+```{r}
+gene_md <- data.frame('mean' = apply(counts,1,mean),
+                      row.names = rownames(spat))
+head(gene_md)
+ggplot(gene_md, aes(x = mean)) +
+  geom_histogram()
+
+gene_md <- data.frame('mean' = apply(counts,1,mean),
+                      row.names = rownames(spat))
+
+gene_md$group <- ifelse(gene_md$mean < .001,'< 0.001',
+                        ifelse(gene_md$mean < .01, '< 0.01',
+                               ifelse(gene_md$mean < 0.1 , '< 0.1',
+                                      ifelse(gene_md$mean < 1,'< 1',
+                                             ifelse(gene_md$mean < 10,'< 10', '> 10')))))
+
+ggplot(gene_md, aes(x = mean)) +
+  geom_histogram() +
+  geom_vline(xintercept = c(.001,.01,.1,1,10), colour = 'red', linetype = 2) +
+  scale_x_log10()
+
+ggplot(gene_md, aes(x = group, fill = group)) +
+  geom_bar() +
+  ylim(0,170) +
+  theme_bw() +
+  geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -1)
+
+gene_md$group <- ifelse(gene_md$mean < .01, '< 0.01',
+                             ifelse(gene_md$mean < 0.1 , '< 0.1',
+                                    ifelse(gene_md$mean < 1,'< 1','> 1')))
+
+ggplot(gene_md, aes(x = mean)) +
+  geom_histogram() +
+  geom_vline(xintercept = c(.01,.1,1), colour = 'red', linetype = 2) +
+  scale_x_log10()
+
+colors_ <- scales::hue_pal()(4)
+ggplot(gene_md, aes(x = group, fill = group)) +
+  geom_bar() +
+  scale_fill_manual(values = colors_) +
+  ylim(0,170) +
+  theme_bw() +
+  geom_text(stat = 'count', aes(label = after_stat(count)), vjust = -1)
+
+names(colors_) <- levels(as.factor(gene_md$group))
+```
+
+Doesn't look the same, but I think these cutoffs could work for our purposes.
+
+## 1C
+
+```{r}
+cnts <- as.data.frame(counts)
+
+plot_list <- list()
+for (i in levels(as.factor(gene_md$group))){
+  print(i)
+  
+  p <- cnts[rownames(gene_md[gene_md$group == i,]),]
+  
+  colnames(p) <- paste0(colnames(p), '_', spat$nCount_RNA)
+  p <- reshape2::melt(as.matrix(p))
+  p[,c('cell','nCount')] <- tstrsplit(p$Var2, '_')
+  p$nCount <- as.numeric(p$nCount)
+  
+  plot_list[[i]] <- ggplot(p, aes(x= nCount, y = value)) +
+    geom_smooth(colour = 'black', fill = colors_[i]) +
+    theme_bw() +
+    ylab('Gene count') +
+    ggtitle(paste0("Group ", i, " genes"))
+}
+```
+
+```{r}
+cnts <- as.data.frame(counts)
+
+i <- "< 0.01"
+p <- cnts[rownames(gene_md[gene_md$group == i,]),]
+
+colnames(p) <- paste0(colnames(p), '_', spat$nCount_RNA)
+p <- reshape2::melt(as.matrix(p))
+p[,c('cell','nCount')] <- tstrsplit(p$Var2, '_')
+p$nCount <- as.numeric(p$nCount)
+
+ggplot(p, aes(x = nCount)) + geom_histogram(bins = 40)
+```
+
+```{r}
+# plot_list[["< 0.01"]]
+```
+
+```{r}
+library(ggpubr)
+
+ggarrange(plotlist = plot_list, nrow = 2, ncol = 2)
+```
+
+## 1D
+
+```{r}
+cnts <- as.data.frame(spat@assays$RNA@scale.data)
+
+plot_list <- list()
+for (i in levels(as.factor(gene_md$group))){
+  print(i)
+  
+  p <- cnts[rownames(gene_md[gene_md$group == i,]),]
+  
+  colnames(p) <- paste0(colnames(p), '_', spat$nCount_RNA)
+  p <- reshape2::melt(as.matrix(p))
+  p[,c('cell','nCount')] <- tstrsplit(p$Var2, '_')
+  p$nCount <- as.numeric(p$nCount)
+  
+  plot_list[[i]] <- ggplot(p, aes(x= nCount, y = value)) +
+    geom_smooth(colour = 'black', fill = colors_[i]) +
+    theme_bw() +
+    ylab('Scaled log-norm expression') +
+    ggtitle(paste0("Group ", i, " genes"))
+}
+```
+```{r}
+# plot_list[["< 0.01"]]
+```
+
+```{r}
+ggarrange(plotlist = plot_list, nrow = 2, ncol = 2)
+```
+
+## 1E
+
+```{r}
+spat$quartile <- cut(spat$nCount_RNA, 
+                     quantile(spat$nCount_RNA, probs = seq(0,1,.2)),
+                     include.lowest = TRUE, labels = F)
+
+# quantile(spat$nCount_RNA)
+# ggplot(spat@meta.data, aes(x = nCount_RNA, y = quartile)) + 
+#   geom_point()
+```
+
+```{r}
+cnts <- as.data.frame(spat@assays$RNA@counts)
+gene_md$var <- apply(counts,1,var)
+gene_md_full <- gene_md
+# gene_md
+template <- gene_md[,c('mean','group')]
+
+spat$quartile <- as.factor(spat$quartile)
+
+for (i in 1:5){
+  df <- cnts[,rownames(spat@meta.data[spat$quartile == i,])]
+  
+  gene_md[,paste0('var_group_',i)] <- apply(df,1,var)
+}
+
+df <- gene_md[,grepl('var_', colnames(gene_md))]
+rownames(df) <- paste0(rownames(df),'_',rowSums(df),'_',gene_md$group)
+
+df <- reshape2::melt(as.matrix(df))
+
+df[,c('gene','var_sum','gene_group')] <- tstrsplit(df$Var1,'_')
+
+df$cell_group <- tstrsplit(df$Var2,'_', keep = 3)[[1]]
+df$var_sum <- as.numeric(df$var_sum)
+df$var_perc <- df$value / df$var_sum
+
+table(df$gene_group)
+
+# ggplot(df, aes(x = gene_group, y = var_perc, group = cell_group,
+#                fill = cell_group)) +
+#   geom_bar(stat = 'identity')
+
+df2 <- merge(df, as.data.frame(table(df$gene_group)), by.x = 'gene_group',
+             by.y = 'Var1')
+
+df2$var_perc_new <- df2$var_perc / df2$Freq *5
+
+ggplot(df2, aes(x = gene_group, y = var_perc_new, group = cell_group,
+               fill = cell_group)) +
+  scale_fill_manual(values = scales::hue_pal()(15)[c(5,7,9,11,15)]) +
+  geom_bar(stat = 'identity') +
+  ggtitle('UMI Counts') + theme_minimal() +
+  ylab('% variance contribution')
+
+plot_list <- list()
+
+plot_list[[1]] <- ggplot(df2, aes(x = gene_group, y = var_perc_new, group = cell_group,
+               fill = cell_group)) +
+  scale_fill_manual(values = scales::hue_pal()(15)[c(5,7,9,11,15)]) +
+  geom_bar(stat = 'identity') +
+  ggtitle('UMI Counts') + theme_minimal() +
+  ylab('% variance contribution')
+```
+
+```{r}
+cnts <- as.data.frame(spat@assays$RNA@data)
+# gene_md$var <- apply(counts,1,var)
+gene_md_full <- gene_md
+# gene_md
+template <- gene_md[,c('mean','group')]
+
+spat$quartile <- as.factor(spat$quartile)
+
+for (i in 1:5){
+  df <- cnts[,rownames(spat@meta.data[spat$quartile == i,])]
+  
+  gene_md[,paste0('var2_group_',i)] <- apply(df,1,var)
+}
+
+df <- gene_md[,grepl('var2_', colnames(gene_md))]
+rownames(df) <- paste0(rownames(df),'_',rowSums(df),'_',gene_md$group)
+
+df <- reshape2::melt(as.matrix(df))
+
+df[,c('gene','var_sum','gene_group')] <- tstrsplit(df$Var1,'_')
+
+df$cell_group <- tstrsplit(df$Var2,'_', keep = 3)[[1]]
+df$var_sum <- as.numeric(df$var_sum)
+df$var_perc <- df$value / df$var_sum
+
+table(df$gene_group)
+# ggplot(df, aes(x = gene_group, y = var_perc, group = cell_group,
+#                fill = cell_group)) +
+#   geom_bar(stat = 'identity')
+
+df2 <- merge(df, as.data.frame(table(df$gene_group)), by.x = 'gene_group',
+             by.y = 'Var1')
+
+df2$var_perc_new <- df2$var_perc / df2$Freq *5
+
+ggplot(df2, aes(x = gene_group, y = var_perc_new, group = cell_group,
+               fill = cell_group)) +
+  scale_fill_manual(values = scales::hue_pal()(15)[c(5,7,9,11,15)]) +
+  geom_bar(stat = 'identity') +
+  ggtitle('UMI Counts') + theme_minimal() +
+  ylab('% variance contribution')
+
+plot_list[[2]] <- ggplot(df2, aes(x = gene_group, y = var_perc_new, group = cell_group,
+               fill = cell_group)) +
+  scale_fill_manual(values = scales::hue_pal()(15)[c(5,7,9,11,15)]) +
+  geom_bar(stat = 'identity') +
+  ggtitle('UMI Counts') + theme_minimal() +
+  ylab('% variance contribution')
+```
+
+```{r}
+ggarrange(plotlist = plot_list, ncol = 2)
+```
+
+## 3A
+
+```{r}
+cnts <- as.data.frame(spat@assays$SCT@scale.data)
+
+plot_list <- list()
+for (i in levels(as.factor(gene_md$group))){
+  print(i)
+  
+  p <- cnts[rownames(gene_md[gene_md$group == i,]),]
+  
+  colnames(p) <- paste0(colnames(p), '_', spat$nCount_RNA)
+  p <- reshape2::melt(as.matrix(p))
+  p[,c('cell','nCount')] <- tstrsplit(p$Var2, '_')
+  p$nCount <- as.numeric(p$nCount)
+  
+  plot_list[[i]] <- ggplot(p, aes(x= nCount, y = value)) +
+    geom_smooth(colour = 'black', fill = colors_[i]) +
+    theme_bw() +
+    ylab('Scaled log-norm expression') +
+    ggtitle(paste0("Group ", i, " genes"))
+}
+```
+
+```{r}
+ggarrange(plotlist = plot_list, ncol = 2, nrow = 2)
+```
+
+## 3B
+
+```{r}
+cnts <- as.data.frame(spat@assays$SCT@scale.data)
+# gene_md$var <- apply(counts,1,var)
+gene_md_full <- gene_md
+gene_md <- gene_md[rownames(cnts),]
+template <- gene_md[,c('mean','group')]
+
+spat$quartile <- as.factor(spat$quartile)
+
+for (i in 1:5){
+  df <- cnts[rownames(cnts),rownames(spat@meta.data[spat$quartile == i,])]
+  
+  gene_md[,paste0('var2_group_',i)] <- apply(df,1,var)
+}
+
+df <- gene_md[,grepl('var2_', colnames(gene_md))]
+rownames(df) <- paste0(rownames(df),'_',rowSums(df),'_',gene_md$group)
+
+df <- reshape2::melt(as.matrix(df))
+
+df[,c('gene','var_sum','gene_group')] <- tstrsplit(df$Var1,'_')
+
+df$cell_group <- tstrsplit(df$Var2,'_', keep = 3)[[1]]
+df$var_sum <- as.numeric(df$var_sum)
+df$var_perc <- df$value / df$var_sum
+
+table(df$gene_group)
+# ggplot(df, aes(x = gene_group, y = var_perc, group = cell_group,
+#                fill = cell_group)) +
+#   geom_bar(stat = 'identity')
+
+df2 <- merge(df, as.data.frame(table(df$gene_group)), by.x = 'gene_group',
+             by.y = 'Var1')
+
+df2$var_perc_new <- df2$var_perc / df2$Freq *5
+
+ggplot(df2, aes(x = gene_group, y = var_perc_new, group = cell_group,
+               fill = cell_group)) +
+  scale_fill_manual(values = scales::hue_pal()(15)[c(5,7,9,11,15)]) +
+  geom_bar(stat = 'identity') +
+  ggtitle('UMI Counts') + theme_minimal() +
+  ylab('% variance contribution')
+```
+
+## 3C
+
+```{r}
+plot_list <- list()
+```
+
+
+```{r}
+cnts <- as.data.frame(spat@assays$RNA@data)
+gene_md <- gene_md_full
+
+x <- t(cnts)
+# dim(x)
+
+cor_ <- as.data.frame(cor(x, spat$nCount_RNA, method = 'pearson'))
+
+# rownames(gene_md)[!(rownames(gene_md) %in% rownames(cor_))]
+
+cor_$gene_group <- gene_md[rownames(cor_),]$group
+
+plot_list[[1]] <- ggplot(cor_, aes(x = gene_group, y = V1, fill = gene_group)) +
+  geom_violin(scale = 'width') +
+  theme_bw() +
+  ylim(-.25,.5) +
+  ggtitle('Log-norm expression') +
+  ylab('Correlation with nCount') +
+  geom_hline(yintercept = 0, colour = 'black', size = 2, linetype = 2)
+
+```
+
+```{r}
+cnts <- as.data.frame(spat@assays$SCT@scale.data)
+gene_md <- gene_md_full
+
+x <- t(cnts)
+# dim(x)
+
+cor_ <- as.data.frame(cor(x, spat$nCount_RNA, method = 'pearson'))
+
+# rownames(gene_md)[!(rownames(gene_md) %in% rownames(cor_))]
+
+cor_$gene_group <- gene_md[rownames(cor_),]$group
+
+plot_list[[2]] <- ggplot(cor_, aes(x = gene_group, y = V1, fill = gene_group)) +
+  geom_violin(scale = 'width') +
+  theme_bw() +
+  ylim(-.25,.5) +
+  ggtitle('Pearson residuals') +
+  ylab('Correlation with nCount') +
+  geom_hline(yintercept = 0, colour = 'black', size = 2, linetype = 2)
+# plot_list[[2]]
+```
+
+```{r}
+ggarrange(plotlist = plot_list, ncol = 2, common.legend = T)
+```
+
+# SessionInfo
+
+```{r}
+# saveRDS(spat, '/Users/DouglasHannumJr/Desktop/s3_bucket_data/s3_bucket_data/spat.Rds')
+```
+
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,126 @@
+---
+title: "Testing geom_sf"
+author: "D. Ford Hannum"
+date: "2023-05-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sfarrow)
+library(ggplot2)
+library(Seurat)
+library(data.table)
+library(dplyr)
+```
+
+
+```{r}
+data.dir <- 'C:/Users/DouglasHannumJr/OneDrive - Vizgen/Desktop/data/mouse_brain_showcase/Slice-1_Replicate-1/'
+list.files(data.dir)
+```
+
+```{r}
+metadata <- fread(paste0(data.dir,'cell_metadata.csv'),data.table = F)
+cnts <- fread(paste0(data.dir,'cell_by_gene.csv'), data.table = F)
+cnts <- as.sparse(cnts)
+segmentations <- sfarrow::st_read_parquet(paste0(data.dir, 'cell_boundaries.parquet'))
+```
+
+```{r}
+gc()
+```
+
+```{r}
+x <- table(segmentations$EntityID)
+ggplot(as.data.frame(x), aes(x = Freq)) + geom_histogram()
+```
+
+```{r}
+z3 <- segmentations[segmentations$ZIndex == 3,]
+```
+
+```{r}
+z3$cluster <- as.factor(sample(1:10,replace = T, size = dim(z3)[1]))
+z3
+```
+
+```{r}
+ggplot(z3[1:10,], aes(fill = cluster)) + geom_sf() +
+  geom_sf_text(aes(label = ID))
+```
+
+```{r}
+object.size(z3)
+```
+
+```{r}
+segs <- filter(segmentations, ZIndex == 3) %>% pull(Geometry)
+
+# test.segs <- lapply(segs %>% seq, function(i) segs[[i]][[1]] %>% length)
+
+test.segs <- lapply(segs %>% seq, function(i)segs[[i]][[1]] %>% length)
+
+sum(test.segs != 1)
+
+names(segs) <- filter(segmentations, ZIndex == 3) %>% pull(EntityID) %>% as.character
+
+gc()
+# segs_list <- BiocParallel::bplapply(seqs %>% seq,
+#                                     function(i){
+#                                       segs[[i]][[1]] %>% 
+#                                         data.table::as.data.table(x = .) %>%
+#                                         mutate(cell = names(segs)[i])},
+#                                     BPPARAM = BiocParallel::MulticoreParam
+#                                     })
+
+segs_list <- lapply(segs %>% seq, function(i){
+  segs[[i]][[1]] %>% data.table::as.data.table(x = .) %>%
+    mutate(cell = names(segs)[i])})
+
+```
+
+```{r}
+segs = rbindlist(segs_list)
+names(segs)[1:2] <- c('x','y')
+
+object.size(segs)
+```
+
+```{r}
+ggplot(metadata, aes(x = center_x, y = center_y)) + geom_point()
+
+metadata$fov <- metadata$center_x > 2000 & metadata$center_x < 2500 & metadata$center_y < 4000 & metadata$center_y > 3500
+
+table(metadata$fov)
+
+ggplot(metadata, aes(x = center_x, y = center_y, colour = fov)) + geom_point()
+```
+
+```{r}
+fov <- metadata[metadata$fov,]
+
+test_segs <- segs[segs$cell %in% fov$EntityID,]
+```
+
+
+```{r}
+start.time <- Sys.time()
+ggplot(test_segs, aes(x = x, y = y, group = cell)) +
+  geom_polygon() + coord_fixed()
+end.time <- Sys.time()
+end.time - start.time
+```
+
+```{r}
+test_z3 <- z3[z3$EntityID %in% fov$EntityID,]
+```
+
+
+```{r}
+start.time <- Sys.time()
+ggplot(test_z3) +
+  geom_sf()
+end.time <- Sys.time()
+end.time - start.time
+```

@@ -1,0 +1,120 @@
+---
+title: "Updated Seurat"
+date: "2023-05-10"
+author: D. Ford Hannum Jr
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    highlight: tango
+    number_sections: true
+    toc_float: yes
+---
+
+```{r setup, include=TRUE, echo = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+# knitr::opts_knit$set(root.dir = '../data/mouse_brain_showcase/Slice-1_Replicate-1/')
+library(Seurat)
+
+# # install.packages('arrow')
+# # install.packages('wkb')
+# # install.packages('sf')
+# 
+# library(arrow) # for downloading the parquet file
+# library(wkb) # for transferring coordinates from "binary" 
+# library(sf) # process tools for spatial data
+# library(ggplot2)
+
+# install.packages('sfarrow')
+
+library(sfarrow)
+library(dplyr)
+```
+
+# Introduction
+
+There is an [open pull request](https://github.com/satijalab/seurat/pull/7190) (5/10/23) on Seurat for an update to loading the parquet files into the seurat object.
+
+Here I'll see how they access the pull request and see if it is more efficient that what we've previously done.
+
+I won't copy all the code over, but will focus once they load in the parquet file.
+
+```{r}
+file2read <- '../data/mouse_brain_showcase/Slice-1_Replicate-1/cell_boundaries.parquet'
+z = 3L
+
+```
+
+```{r}
+# read .parquet file ----
+parq <- sfarrow::st_read_parquet(file2read)
+
+# get all cell segmentations
+segs <- filter(parq, ZIndex == z) %>% pull(Geometry)
+# check if any cells have > 1 segmentation boundary
+test.segs <- 
+ lapply(segs %>% seq, function(i) segs[[i]][[1]] %>% length)
+
+class(test.segs)
+length(test.segs)
+
+if (which(unlist(test.segs) > 1) %>% any) {
+ segs.art.index <- which(unlist(test.segs) > 1)
+ message(segs.art.index %>% length, 
+         " Cells have > 1 segmentaion boundary artifacts", "\n",
+         "..removing artifacts", "\n",
+         "..keeping cell boundaries with maximum coords")
+ # usually artifacts have small boundaries/coords
+ # find cell boundaries with maximum coords
+ for (i in segs.art.index %>% seq) { 
+   dims <- lapply(segs[[segs.art.index[i]]][[1]] %>% seq(), 
+                  function(d) { dim(segs[[segs.art.index[i]]][[1]][[d]])[1] } )
+   # get & keep boundaries with maximum coords
+   maxs.segs <- which(unlist(dims) == max(unlist(dims)))  
+   segs[[segs.art.index[i]]][[1]] <- segs[[segs.art.index[i]]][[1]][maxs.segs]
+ }
+} else { message("All cells have 1 segmentaion boundary (no artifacts)") }
+# add cell names 
+names(segs) <- filter(parq, ZIndex == z) %>% pull(EntityID) %>% as.character       
+
+# TODO: (optionally) resample & make cell boundaries equidistant!
+if (use.BiocParallel) {
+ # extract cell boundaries per cells (faster)
+ gc() %>% invisible() # free up memory
+ message("Using fast extraction of cell boundaries..")  
+ segs_list <-
+   BiocParallel::bplapply(segs %>% seq,
+                          function(i) {
+                            segs[[i]][[1]] %>% 
+                              data.table::as.data.table(x = .) %>%
+                              #as.data.frame %>%
+                              mutate(cell = names(segs)[i]) },
+                          BPPARAM = BiocParallel::MulticoreParam(workers.total, tasks = 100L, 
+                                                                 force.GC = FALSE, 
+                                                                 progressbar = TRUE)
+   )
+} else {
+ # extract cell boundaries per cells
+ message("Extracting of cell boundaries..")    
+ segs_list <-
+   future.apply::future_lapply(segs %>% seq,
+                               function(i) {
+                                 segs[[i]][[1]] %>%
+                                   data.table::as.data.table(x = .) %>%
+                                   #as.data.frame %>% 
+                                   mutate(cell = names(segs)[i])
+                                 }
+                               )
+}
+
+#segs_list %>% length
+# df of all cell segmentations
+gc() %>% invisible() # free up memory
+#segs <- do.call("rbind", segs_list)
+segs <- data.table::rbindlist(segs_list)
+names(segs)[1:2] <- c("x", "y") 
+message("All cell boundaries (with no artifacts) are loaded..")        
+segs
+} 
+```
+

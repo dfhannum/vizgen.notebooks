@@ -1,0 +1,94 @@
+---
+title: "Loading Cell Boundaries"
+author: "D. Ford Hannum"
+date: "2023-05-23"
+output: html_document
+---
+
+# Cell Segmentation
+
+Here we will demonstrate how to read in a parquet file containing the cell segmentation results from Vizgen. For this walk through in R we will use the [sfarrow package](https://github.com/wcjochem/sfarrow) to read in the parquet, and the [sf](https://r-spatial.github.io/sf/) to view the segmentations.
+
+The data consists of polygons for cell boundaries across seven z-planes (note not all cells are found in every z-plane).
+
+## Overview
+
+-   Cell boundaries are stored in a single file called cell_boundaries.parquet
+-   This file format is an open-source tabular format with excellent I/O performance
+-   Cell boundaries are in the units of microns
+-   This data is generated using GeoPandas
+-   This file format supplants the hdf5 files used in prior versions of the MERSCOPE Instrument Software
+
+## Column Information:
+
+-   `[BLANK]` The first, unnamed column is a numeric index. It is sorted and unique, but entries are not consecutive.
+-   `ID` is a numeric row index that begins from zero. `ID` is unique within an analysis region.
+-   `EntityID` is an integer (int64) identifier for a cell or other biological entity identified through spatial analysis. `EntityID` has the format: analysis time stamp (%m%d%H%M%S), task index, tile index, geometry index. `EntityID` is guaranteed to be unique to a biological entity (cell) within an analysis region. The use of the analysis time stamp in the ID makes the `EntityID` likely to be unique across all experiments run on an instrument.
+-   `Name` A free-text description of the geometry in the row.
+-   `Type` The type of the entity referred to in `EntityID`.
+-   `ZIndex` The z-index of this slice of the biological entity in the 3D stack, corresponds to `global_z` in `detected_transcripts.csv`.
+-   `ZLevel` The z-position of this slice of the biological entity in the 3D stack, expressed in units of microns.
+-   `Geometry` A valid WKT-format MultiPolygon that describes the biological entity (cell) at the given z-level. The vertices of the MultiPolygon are in units of microns relative to the space of the experimental region. `Geometry` uses MultiPolygon objects in order to describe biological entities that may be contiguous in 3D space, but dis-contiguous at a given z-level (i.e. a U-shaped cell). Even if the cell region is contiguous and can be described with a single Polygon, it is stored as a MultiPolygon for data-type consistency.
+-   `ParentID` If this biological entity is related to a higher-level ("parent") entity, the `EntityID` of the parent may be stored here. For example, a "cell" entity may be the parent of one or more "nucleus" entities. If this biological entity does not descend from a parent entity, this value is `None`.
+-   `ParentType` The type of the parent entity, if any. If there is no parent entity, the value is `None`.
+
+
+# Packages
+
+Here we will load the packages sfarrow and sf.
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+library(sfarrow)
+library(sf)
+```
+
+# Data 
+
+Here we are going to use the mouse brain showcase data (Slice 1, Replicate 1). The data was converted from .hdf5 files to a parquet file eternally and currently not available in the public google cloud [bucket](https://console.cloud.google.com/storage/browser/public-datasets-vizgen-merfish;tab=objects?pageState=(%22StorageObjectListTable%22:(%22f%22:%22%255B%255D%22))&prefix=&forceOnObjectsSortingFiltering=false)
+
+```{r}
+dir <- '/Users/DouglasHannumJr/Desktop/mouse_brain_showcase_s1r1/'
+list.files(dir)
+```
+
+# Code 
+
+```{r}
+# Reading in the parquet file
+segmentations <- sfarrow::st_read_parquet(paste0(dir,'cell_boundaries.parquet'))
+```
+
+```{r}
+# Looking at the first five rows
+head(segmentations,5)
+```
+
+We see that the first five polygons all refer to the same cell (EntityID) but on different z-planes (ZIndex or ZLevel).
+
+```{r}
+# Plotting the boundaries of the first five polygons
+plot(st_geometry(segmentations[1:5,]), border = 'black', axes = TRUE)
+```
+
+When we plot just their boundaries we see that they're right on top of each other.
+
+Now, let us look at the first five polygons that are on Z-plane = 3
+
+```{r}
+# Subsetting the data to just z = 3 layer
+z3 = segmentations[segmentations$ZIndex == 3,]
+
+# Plotting the boundaries of the first five cells on z = 3
+plot(st_geometry(z3[1:5,]), border = 'black', axes = TRUE)
+```
+
+Here we see are looking at five different cells. 
+
+It will take longer to run but we can look at all the cells that pass through Z-plane = 3.
+
+```{r}
+# Plotting all cell boundaries on z = 3
+plot(st_geometry(z3), border='lightgrey', axes = TRUE)
+```
+
